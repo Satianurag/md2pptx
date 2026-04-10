@@ -1,0 +1,9 @@
+python-pptx==1.0.2
+mistune==3.2.0
+pydantic==2.12.5
+langgraph==1.1.6
+langchain-google-genai==4.2.1
+langchain-core>=0.3.0
+pandas==3.0.2
+rich>=13.0.0
+python-dotenv>=1.0.0
