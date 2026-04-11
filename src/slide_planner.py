@@ -1,6 +1,7 @@
 from __future__ import annotations
 import logging
 from .schemas import ContentTree, ContentSection, SlideMasterInfo, SlidePlan
+from .content_profiler import ContentProfile
 from .llm import invoke_llm_structured
 from . import config
 
@@ -101,10 +102,34 @@ def _append_section(parts: list[str], section: ContentSection, depth: int) -> No
         _append_section(parts, sub, depth + 1)
 
 
+def _build_profile_context(profile: ContentProfile | None) -> str:
+    """Build a prompt section from the content profile."""
+    if profile is None:
+        return ""
+    lines = [
+        "\nCONTENT PROFILE (use this to guide visualization choices):",
+        f"  Archetype: {profile.archetype}",
+        f"  Data richness: {profile.data_richness}",
+        f"  Recommended visual ratio: {profile.recommended_visual_ratio:.0%} of content slides should be visual",
+        f"  Best chart types for this content: {', '.join(profile.recommended_chart_types)}",
+        f"  Best infographic types: {', '.join(profile.recommended_infographic_types)}",
+        f"  Total tables: {profile.total_tables}, Total metrics: {profile.total_metrics}",
+    ]
+    if profile.best_tables:
+        lines.append(f"  Top chart-worthy tables: {len(profile.best_tables)} ranked")
+    if profile.best_metrics:
+        top_m = profile.best_metrics[:5]
+        lines.append(f"  Top KPI metrics: {', '.join(m.metric.label + '=' + m.metric.value for m in top_m)}")
+    if profile.sections_by_value:
+        lines.append(f"  Sections by data value (highest first): {', '.join(profile.sections_by_value[:6])}")
+    return "\n".join(lines)
+
+
 def plan_slides(
     content_tree: ContentTree,
     master_info: SlideMasterInfo | None = None,
     target_slide_count: int = 12,
+    content_profile: ContentProfile | None = None,
 ) -> SlidePlan:
     """Use the LLM to generate a SlidePlan from the ContentTree."""
     min_slides = config.MIN_SLIDES
@@ -119,6 +144,7 @@ def plan_slides(
     )
 
     condensed = _condense_content_tree(content_tree)
+    profile_context = _build_profile_context(content_profile)
 
     # Build available layouts info
     layouts_info = ""
@@ -131,6 +157,7 @@ Create a slide plan for the following content. Target {target_slide_count} slide
 
 {condensed}
 {layouts_info}
+{profile_context}
 
 Generate the SlidePlan JSON with storyline_summary, target_slide_count, and the slides array.\
 """

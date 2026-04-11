@@ -1,9 +1,15 @@
 from __future__ import annotations
 import re
 import logging
+from typing import Optional
 from .schemas import ContentTree, ContentSection
 
 logger = logging.getLogger(__name__)
+
+# Late import to avoid circular dependency
+def _get_profile_cls():
+    from .content_profiler import ContentProfile
+    return ContentProfile
 
 # Max chars to keep per section for LLM processing
 MAX_SECTION_TEXT_CHARS = 500
@@ -13,10 +19,11 @@ MAX_TABLE_ROWS = 10
 MAX_TOTAL_CHARS = 100_000  # ~25k tokens
 
 
-def chunk_content_tree(tree: ContentTree) -> ContentTree:
+def chunk_content_tree(tree: ContentTree, content_profile=None) -> ContentTree:
     """Reduce a large ContentTree to fit within token limits while preserving structure.
 
     Uses tiered chunking: lighter for <5MB, more aggressive for >5MB.
+    When *content_profile* is available, prioritise high-value sections.
     """
     total_chars = _estimate_chars(tree)
 
@@ -45,7 +52,14 @@ def chunk_content_tree(tree: ContentTree) -> ContentTree:
     # For aggressive tier, limit sections count first
     max_sections = 15 if tier == "standard" else (10 if tier == "moderate" else 8)
     if len(tree.sections) > max_sections:
-        tree.sections = tree.sections[:max_sections]
+        # Use profile's section ranking to keep high-value sections
+        if content_profile and hasattr(content_profile, 'sections_by_value') and content_profile.sections_by_value:
+            value_order = {h.lower().strip(): i for i, h in enumerate(content_profile.sections_by_value)}
+            ranked = sorted(tree.sections, key=lambda s: value_order.get(s.heading.lower().strip(), 999))
+            tree.sections = ranked[:max_sections]
+            logger.info(f"Profile-aware chunking: kept {max_sections} highest-value sections")
+        else:
+            tree.sections = tree.sections[:max_sections]
 
     # Truncate each section (with tier-aware limits)
     sec_text = 300 if tier == "aggressive" else (400 if tier == "moderate" else MAX_SECTION_TEXT_CHARS)

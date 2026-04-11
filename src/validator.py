@@ -7,6 +7,12 @@ from .schemas import (
 )
 from . import config
 
+# Optional profile import for type hints
+try:
+    from .content_profiler import ContentProfile
+except ImportError:
+    ContentProfile = None  # type: ignore
+
 logger = logging.getLogger(__name__)
 
 SLIDE_W = config.SLIDE_WIDTH
@@ -31,12 +37,13 @@ class ValidationResult:
         )
 
 
-def validate_and_fix(spec: PresentationSpec) -> ValidationResult:
+def validate_and_fix(spec: PresentationSpec, content_profile=None) -> ValidationResult:
     """Validate a PresentationSpec and apply rule-based auto-fixes. Mutates spec in place."""
     result = ValidationResult()
 
     _check_slide_count(spec, result)
     _check_slide_flow(spec, result)
+    _check_visual_ratio(spec, result, content_profile)
 
     for slide in spec.slides:
         _check_slide(slide, result)
@@ -57,6 +64,32 @@ def _check_slide_count(spec: PresentationSpec, result: ValidationResult) -> None
         result.warnings.append(f"Only {n} slides, minimum is {config.MIN_SLIDES}")
     elif n > config.MAX_SLIDES:
         result.warnings.append(f"{n} slides exceeds maximum {config.MAX_SLIDES}")
+
+
+def _check_visual_ratio(spec: PresentationSpec, result: ValidationResult, profile=None) -> None:
+    """Check that the deck meets the recommended visual ratio from the content profile."""
+    content_slides = [
+        s for s in spec.slides
+        if s.slide_type not in ("cover", "agenda", "section_divider", "thank_you")
+    ]
+    if not content_slides:
+        return
+
+    visual_slides = sum(
+        1 for s in content_slides
+        if any(el.element_type in ("chart", "table", "infographic") for el in s.elements)
+    )
+    ratio = visual_slides / len(content_slides)
+
+    target = 0.5  # default: 50% visual
+    if profile and hasattr(profile, 'recommended_visual_ratio'):
+        target = profile.recommended_visual_ratio
+
+    if ratio < target * 0.6:  # warn if below 60% of target
+        result.warnings.append(
+            f"Visual ratio {ratio:.0%} is below recommended {target:.0%} "
+            f"({visual_slides}/{len(content_slides)} content slides have visuals)"
+        )
 
 
 def _check_slide_flow(spec: PresentationSpec, result: ValidationResult) -> None:

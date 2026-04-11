@@ -10,6 +10,7 @@ from .schemas import (
     TableContent, ShapeContent, InfographicContent, InfographicItem,
     DataTable, KeyMetric,
 )
+from .content_profiler import ContentProfile
 from .llm import invoke_llm
 from .grid_system import grid
 from . import config
@@ -74,6 +75,7 @@ def generate_presentation_spec(
     slide_plan: SlidePlan,
     master_info: SlideMasterInfo | None = None,
     template_path: str = "",
+    content_profile: ContentProfile | None = None,
 ) -> PresentationSpec:
     """Convert a SlidePlan + ContentTree into a full PresentationSpec."""
 
@@ -83,7 +85,7 @@ def generate_presentation_spec(
         slide_spec = _generate_slide_spec(content_tree, plan_item, slide_plan)
         slides.append(slide_spec)
 
-    _ensure_visual_coverage(slides, content_tree)
+    _ensure_visual_coverage(slides, content_tree, content_profile)
 
     return PresentationSpec(
         title=content_tree.title,
@@ -94,13 +96,28 @@ def generate_presentation_spec(
     )
 
 
-def _ensure_visual_coverage(slides: list[SlideSpec], tree: ContentTree) -> None:
-    """Ensure the deck contains dedicated visual slides without cluttering existing ones."""
-    if not tree.all_tables:
+def _ensure_visual_coverage(
+    slides: list[SlideSpec],
+    tree: ContentTree,
+    profile: ContentProfile | None = None,
+) -> None:
+    """Ensure the deck contains dedicated visual slides without cluttering existing ones.
+
+    When a *profile* is available, use its ranked tables/metrics for smarter selection.
+    """
+    # Build ordered table list (profile-ranked first, then fallback)
+    ordered_tables: list[DataTable] = []
+    if profile and profile.best_tables:
+        ordered_tables = [st.table for st in profile.best_tables]
+    if not ordered_tables:
+        ordered_tables = list(tree.all_tables)
+
+    if not ordered_tables:
+        _renumber_slides(slides)
         return
 
     if not _deck_has_element(slides, "chart"):
-        for table in tree.all_tables:
+        for table in ordered_tables:
             if not (table.rows and table.headers and len(table.headers) >= 2):
                 continue
             categories, series = _extract_chart_data(table)
@@ -114,7 +131,7 @@ def _ensure_visual_coverage(slides: list[SlideSpec], tree: ContentTree) -> None:
 
     if not _deck_has_element(slides, "table"):
         best_table = None
-        for table in tree.all_tables:
+        for table in ordered_tables:
             if table.rows and table.headers and len(table.headers) >= 2:
                 if _should_render_as_table(table) or best_table is None:
                     best_table = table

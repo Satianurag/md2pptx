@@ -16,6 +16,7 @@ from .spec_generator import generate_presentation_spec
 from .validator import validate_and_fix, ValidationResult
 from .pptx_renderer import render_presentation
 from .content_chunker import chunk_content_tree
+from .content_profiler import profile_content, ContentProfile
 from . import config
 
 logger = logging.getLogger(__name__)
@@ -27,6 +28,7 @@ class PipelineState(TypedDict, total=False):
     md_text: str
     md_path: str
     content_tree: Optional[ContentTree]
+    content_profile: Optional[ContentProfile]
     template_path: str
     master_info: Optional[SlideMasterInfo]
     slide_plan: Optional[SlidePlan]
@@ -66,6 +68,19 @@ def parse_md_node(state: PipelineState) -> dict:
                 f"tables={len(content_tree.all_tables)}, metrics={len(content_tree.all_metrics)}")
 
     return {"content_tree": content_tree}
+
+
+def profile_content_node(state: PipelineState) -> dict:
+    """Analyse content tree and produce a ContentProfile for adaptive decisions."""
+    logger.info("Node: profile_content")
+    content_tree = state.get("content_tree")
+    if not content_tree:
+        return {}
+    profile = profile_content(content_tree)
+    logger.info(f"Profile: archetype={profile.archetype}, data_richness={profile.data_richness}, "
+                f"vis_ratio={profile.recommended_visual_ratio:.1f}, "
+                f"charts={profile.recommended_chart_types}, infographics={profile.recommended_infographic_types}")
+    return {"content_profile": profile}
 
 
 def analyze_template_node(state: PipelineState) -> dict:
@@ -109,8 +124,10 @@ def plan_slides_node(state: PipelineState) -> dict:
     master_info = state.get("master_info")
     target = state.get("target_slide_count", 12)
 
+    content_profile = state.get("content_profile")
+
     try:
-        slide_plan = plan_slides(content_tree, master_info, target)
+        slide_plan = plan_slides(content_tree, master_info, target, content_profile)
         logger.info(f"Plan: {len(slide_plan.slides)} slides, storyline: {slide_plan.storyline_summary[:80]}...")
         return {"slide_plan": slide_plan}
     except Exception as e:
@@ -131,12 +148,15 @@ def generate_spec_node(state: PipelineState) -> dict:
     if not content_tree or not slide_plan:
         return {"errors": state.get("errors", []) + ["Missing content_tree or slide_plan"]}
 
+    content_profile = state.get("content_profile")
+
     try:
         spec = generate_presentation_spec(
             content_tree=content_tree,
             slide_plan=slide_plan,
             master_info=master_info,
             template_path=template_path,
+            content_profile=content_profile,
         )
         logger.info(f"Spec generated: {len(spec.slides)} slides")
         return {"presentation_spec": spec}
@@ -153,7 +173,8 @@ def validate_node(state: PipelineState) -> dict:
     if not spec:
         return {"errors": state.get("errors", []) + ["No presentation_spec to validate"]}
 
-    result = validate_and_fix(spec)
+    content_profile = state.get("content_profile")
+    result = validate_and_fix(spec, content_profile)
 
     warnings = state.get("warnings", []) + result.warnings
 
@@ -261,6 +282,7 @@ def build_pipeline() -> StateGraph:
 
     # Add nodes
     workflow.add_node("parse_md", parse_md_node)
+    workflow.add_node("profile_content", profile_content_node)
     workflow.add_node("analyze_template", analyze_template_node)
     workflow.add_node("plan_slides", plan_slides_node, retry=llm_retry)
     workflow.add_node("generate_spec", generate_spec_node, retry=llm_retry)
@@ -270,7 +292,8 @@ def build_pipeline() -> StateGraph:
 
     # Add edges
     workflow.add_edge(START, "parse_md")
-    workflow.add_edge("parse_md", "analyze_template")
+    workflow.add_edge("parse_md", "profile_content")
+    workflow.add_edge("profile_content", "analyze_template")
     workflow.add_edge("analyze_template", "plan_slides")
     workflow.add_edge("plan_slides", "generate_spec")
     workflow.add_edge("generate_spec", "validate")

@@ -17,6 +17,12 @@ from .schemas import (
 )
 from .slide_master import get_layout_for_slide_type, read_slide_master
 from . import config
+from .drawingml_effects import (
+    add_shadow, add_gradient, add_theme_gradient,
+    remove_outline, set_corner_radius, style_card,
+    style_accent_bar, style_numbered_circle,
+)
+from .components import render_chart_container, render_accent_divider
 
 import logging
 _log = logging.getLogger(__name__)
@@ -352,17 +358,16 @@ def _render_cover(slide, spec: SlideSpec, master_info: SlideMasterInfo | None = 
                          config.CONTENT_WIDTH, Emu(600000),
                          font_size=config.FONT_SUBTITLE, alignment="center")
 
-    # Bottom accent bar on cover
+    # Bottom accent bar on cover with gradient
     accent = slide.shapes.add_shape(
         MSO_SHAPE.RECTANGLE, 0, config.SLIDE_HEIGHT - Emu(120000),
         config.SLIDE_WIDTH, Emu(120000)
     )
-    accent.fill.solid()
     if has_tpl:
-        accent.fill.fore_color.theme_color = MSO_THEME_COLOR.ACCENT_1
+        style_accent_bar(accent, theme_color=MSO_THEME_COLOR.ACCENT_1, angle=0.0)
     else:
-        accent.fill.fore_color.rgb = _hex_to_rgb("4472C4")
-    accent.line.fill.background()
+        add_gradient(accent, [(0.0, _hex_to_rgb("4472C4")), (1.0, _hex_to_rgb("2B579A"))], angle=0.0)
+        remove_outline(accent)
 
     for element in spec.elements:
         _render_element(slide, element, master_info, has_tpl)
@@ -405,19 +410,18 @@ def _render_divider(slide, spec: SlideSpec, has_tpl: bool = False):
                      config.CONTENT_WIDTH, Emu(500000),
                      font_size=config.FONT_SUBTITLE, alignment="center", color="666666")
 
-    # Accent bar under title
+    # Accent bar under title with gradient
     bar_y = Emu(4200000) if spec.subtitle else Emu(3700000)
     bar = slide.shapes.add_shape(
         MSO_SHAPE.RECTANGLE,
         config.MARGIN_LEFT + Emu(3000000), bar_y,
         Emu(5000000), Emu(40000)
     )
-    bar.fill.solid()
     if has_tpl:
-        bar.fill.fore_color.theme_color = MSO_THEME_COLOR.ACCENT_1
+        style_accent_bar(bar, theme_color=MSO_THEME_COLOR.ACCENT_1, angle=0.0)
     else:
-        bar.fill.fore_color.rgb = _hex_to_rgb("4472C4")
-    bar.line.fill.background()
+        add_gradient(bar, [(0.0, _hex_to_rgb("4472C4")), (1.0, _hex_to_rgb("2B579A"))], angle=0.0)
+        remove_outline(bar)
 
 
 def _render_thank_you(slide, spec: SlideSpec, master_info: SlideMasterInfo | None = None,
@@ -493,18 +497,17 @@ def _add_title_bar(slide, title: str, subtitle: str | None = None, has_tpl: bool
         p2.font.color.rgb = RGBColor(0x66, 0x66, 0x66)
         p2.alignment = PP_ALIGN.LEFT
 
-    # Accent line under title
+    # Accent line under title with gradient
     accent_y = Emu(config.MARGIN_TOP + (900000 if subtitle else 560000))
     accent = slide.shapes.add_shape(
         MSO_SHAPE.RECTANGLE, config.MARGIN_LEFT, accent_y,
         Emu(2000000), Emu(36000)
     )
-    accent.fill.solid()
     if has_tpl:
-        accent.fill.fore_color.theme_color = MSO_THEME_COLOR.ACCENT_1
+        style_accent_bar(accent, theme_color=MSO_THEME_COLOR.ACCENT_1, angle=0.0)
     else:
-        accent.fill.fore_color.rgb = _hex_to_rgb("4472C4")
-    accent.line.fill.background()
+        add_gradient(accent, [(0.0, _hex_to_rgb("4472C4")), (1.0, _hex_to_rgb("5B9BD5"))], angle=0.0)
+        remove_outline(accent)
 
 
 # ── Slide furniture (footer bar, accent stripe) ──────────────────────
@@ -555,16 +558,15 @@ def _add_slide_furniture(slide, spec: SlideSpec, has_tpl: bool, deck_title: str)
     p2.font.color.rgb = RGBColor(0x88, 0x88, 0x88)
     p2.alignment = PP_ALIGN.RIGHT
 
-    # ── Left accent stripe ──
+    # ── Left accent stripe with vertical gradient ──
     stripe = slide.shapes.add_shape(
         MSO_SHAPE.RECTANGLE, 0, 0, Emu(60000), config.SLIDE_HEIGHT - footer_h
     )
-    stripe.fill.solid()
     if has_tpl:
-        stripe.fill.fore_color.theme_color = MSO_THEME_COLOR.ACCENT_1
+        style_accent_bar(stripe, theme_color=MSO_THEME_COLOR.ACCENT_1, angle=270.0)
     else:
-        stripe.fill.fore_color.rgb = _hex_to_rgb("4472C4")
-    stripe.line.fill.background()
+        add_gradient(stripe, [(0.0, _hex_to_rgb("4472C4")), (1.0, _hex_to_rgb("2B579A"))], angle=270.0)
+        remove_outline(stripe)
 
 
 # ── Element renderer dispatch ───────────────────────────────────────
@@ -666,14 +668,16 @@ def _render_agenda_bullets(slide, pos, items: list[str], font_size, has_tpl: boo
 
         card = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, x, y, card_w, card_h)
         _apply_light_surface_fill(card, has_tpl, brightness=0.98, fallback_hex="FBFCFE")
+        add_shadow(card, preset="subtle")
+        set_corner_radius(card, 8000)
 
         badge = slide.shapes.add_shape(MSO_SHAPE.OVAL, x + Emu(90000), y + Emu(110000), Emu(220000), Emu(220000))
-        badge.fill.solid()
-        if has_tpl:
-            badge.fill.fore_color.theme_color = MSO_THEME_COLOR.ACCENT_1
-        else:
+        style_numbered_circle(badge, MSO_THEME_COLOR.ACCENT_1 if has_tpl else MSO_THEME_COLOR.ACCENT_1)
+        if not has_tpl:
+            badge.fill.solid()
             badge.fill.fore_color.rgb = _hex_to_rgb("4472C4")
-        badge.line.fill.background()
+            add_shadow(badge, preset="subtle")
+            remove_outline(badge)
         _set_text_frame_text(
             badge.text_frame,
             str(idx + 1),
@@ -703,14 +707,16 @@ def _render_summary_bullets(slide, pos, items: list[str], font_size, has_tpl: bo
 
         card = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, x, y, card_w, card_h)
         _apply_light_surface_fill(card, has_tpl, brightness=0.97, fallback_hex="F8FAFD")
+        add_shadow(card, preset="subtle")
+        set_corner_radius(card, 8000)
 
         accent = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, x, y, card_w, Emu(50000))
-        accent.fill.solid()
         if has_tpl:
-            accent.fill.fore_color.theme_color = MSO_THEME_COLOR.ACCENT_1
+            style_accent_bar(accent, theme_color=MSO_THEME_COLOR.ACCENT_1)
         else:
+            accent.fill.solid()
             accent.fill.fore_color.rgb = _hex_to_rgb("4472C4")
-        accent.line.fill.background()
+            remove_outline(accent)
 
         tx = slide.shapes.add_textbox(x + Emu(120000), y + Emu(120000), card_w - Emu(240000), card_h - Emu(180000))
         _populate_text_list(tx.text_frame, [item], font_size)
@@ -719,14 +725,16 @@ def _render_summary_bullets(slide, pos, items: list[str], font_size, has_tpl: bo
 def _render_content_bullets(slide, pos, items: list[str], font_size, has_tpl: bool) -> None:
     panel = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, pos.left, pos.top, pos.width, pos.height)
     _apply_light_surface_fill(panel, has_tpl, brightness=0.985, fallback_hex="FBFCFE")
+    add_shadow(panel, preset="subtle")
+    set_corner_radius(panel, 6000)
 
     stripe = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, pos.left, pos.top, Emu(70000), pos.height)
-    stripe.fill.solid()
     if has_tpl:
-        stripe.fill.fore_color.theme_color = MSO_THEME_COLOR.ACCENT_1
+        style_accent_bar(stripe, theme_color=MSO_THEME_COLOR.ACCENT_1, angle=270.0)
     else:
+        stripe.fill.solid()
         stripe.fill.fore_color.rgb = _hex_to_rgb("4472C4")
-    stripe.line.fill.background()
+        stripe.line.fill.background()
 
     inner_left = pos.left + Emu(180000)
     inner_top = pos.top + Emu(100000)
@@ -753,6 +761,9 @@ def _render_content_bullets(slide, pos, items: list[str], font_size, has_tpl: bo
 def _render_chart(slide, pos, content: ChartContent,
                   master_info: SlideMasterInfo | None = None, has_tpl: bool = False):
     """Render a native PowerPoint chart."""
+    # Shadow container behind chart (charts can't have shadows directly)
+    render_chart_container(slide, pos.left, pos.top, pos.width, pos.height, has_tpl)
+
     chart_type = CHART_TYPE_MAP.get(content.chart_type, XL_CHART_TYPE.COLUMN_CLUSTERED)
 
     if content.chart_type == "scatter":
@@ -988,16 +999,18 @@ def _render_process_flow(slide, pos, items, has_tpl: bool = False):
     for i, item in enumerate(items):
         x = x_offset + i * (item_width + arrow_gap)
 
-        # ── Rounded rectangle (not chevron — readable at any width) ──
+        # ── Rounded rectangle with shadow + gradient ──
         shape = slide.shapes.add_shape(
             MSO_SHAPE.ROUNDED_RECTANGLE, x, y_center, item_width, item_height
         )
-        shape.fill.solid()
         if has_tpl:
-            shape.fill.fore_color.theme_color = _FLOW_ACCENTS[i % len(_FLOW_ACCENTS)]
+            style_card(shape, theme_color=_FLOW_ACCENTS[i % len(_FLOW_ACCENTS)],
+                       shadow_preset="card", corner_radius=8000)
         else:
-            shape.fill.fore_color.rgb = _hex_to_rgb(_FLOW_FALLBACK[i % len(_FLOW_FALLBACK)])
-        shape.line.fill.background()
+            c1 = _hex_to_rgb(_FLOW_FALLBACK[i % len(_FLOW_FALLBACK)])
+            c2 = RGBColor(max(c1[0] - 20, 0), max(c1[1] - 20, 0), max(c1[2] - 20, 0))
+            style_card(shape, gradient_stops=[(0.0, c1), (1.0, c2)],
+                       shadow_preset="card", corner_radius=8000)
 
         # ── Step number circle overlay (top-left of rectangle) ──
         sc_x = x - step_circle_size // 3
@@ -1073,17 +1086,18 @@ def _render_timeline(slide, pos, items, has_tpl: bool = False):
 
     for i, item in enumerate(items):
         cx = pos.left + i * node_gap + node_gap // 2
-        # Circle marker (uniform ACCENT_1 for brand consistency)
+        # Circle marker with shadow + gradient
         circle = slide.shapes.add_shape(
             MSO_SHAPE.OVAL, cx - circle_size // 2, line_y - circle_size // 2,
             circle_size, circle_size
         )
-        circle.fill.solid()
         if has_tpl:
-            circle.fill.fore_color.theme_color = MSO_THEME_COLOR.ACCENT_1
+            style_numbered_circle(circle, MSO_THEME_COLOR.ACCENT_1)
         else:
+            circle.fill.solid()
             circle.fill.fore_color.rgb = _hex_to_rgb("4472C4")
-        circle.line.fill.background()
+            add_shadow(circle, preset="subtle")
+            remove_outline(circle)
 
         # Step number inside circle
         tf = circle.text_frame
@@ -1138,16 +1152,18 @@ def _render_comparison(slide, pos, items, has_tpl: bool = False):
     for i, item in enumerate(items):
         x = pos.left + i * (card_width + gap)
 
-        # Card background (brand-aligned: 3-color rotation)
+        # Card background with shadow + gradient
         card = slide.shapes.add_shape(
             MSO_SHAPE.ROUNDED_RECTANGLE, x, pos.top, card_width, card_height
         )
-        card.fill.solid()
         if has_tpl:
-            card.fill.fore_color.theme_color = _CMP_ACCENTS[i % len(_CMP_ACCENTS)]
+            style_card(card, theme_color=_CMP_ACCENTS[i % len(_CMP_ACCENTS)],
+                       shadow_preset="card", corner_radius=8000)
         else:
-            card.fill.fore_color.rgb = _hex_to_rgb(_CMP_FALLBACK[i % len(_CMP_FALLBACK)])
-        card.line.fill.background()
+            c1 = _hex_to_rgb(_CMP_FALLBACK[i % len(_CMP_FALLBACK)])
+            c2 = RGBColor(max(c1[0] - 20, 0), max(c1[1] - 20, 0), max(c1[2] - 20, 0))
+            style_card(card, gradient_stops=[(0.0, c1), (1.0, c2)],
+                       shadow_preset="card", corner_radius=8000)
 
         tf = card.text_frame
         tf.word_wrap = True
@@ -1183,7 +1199,7 @@ def _render_comparison(slide, pos, items, has_tpl: bool = False):
 
 def _render_kpi_cards(slide, pos, items, has_tpl: bool = False):
     """Render KPI metric cards with value, title, and vertical centering.
-    Uses 3-color brand rotation: ACCENT_1 + ACCENT_6 + DARK_2."""
+    Uses 3-color brand rotation with shadows and gradients for visual depth."""
     _KPI_ACCENTS = [MSO_THEME_COLOR.ACCENT_1, MSO_THEME_COLOR.ACCENT_6, MSO_THEME_COLOR.DARK_2]
     _KPI_FALLBACK = ["4472C4", "70AD47", "44546A"]
     n = len(items)
@@ -1200,12 +1216,14 @@ def _render_kpi_cards(slide, pos, items, has_tpl: bool = False):
         card = slide.shapes.add_shape(
             MSO_SHAPE.ROUNDED_RECTANGLE, x, y, card_width, card_height
         )
-        card.fill.solid()
         if has_tpl:
-            card.fill.fore_color.theme_color = _KPI_ACCENTS[i % len(_KPI_ACCENTS)]
+            style_card(card, theme_color=_KPI_ACCENTS[i % len(_KPI_ACCENTS)],
+                       shadow_preset="card", corner_radius=8000)
         else:
-            card.fill.fore_color.rgb = _hex_to_rgb(_KPI_FALLBACK[i % len(_KPI_FALLBACK)])
-        card.line.fill.background()
+            c1 = _hex_to_rgb(_KPI_FALLBACK[i % len(_KPI_FALLBACK)])
+            c2 = RGBColor(max(c1[0] - 25, 0), max(c1[1] - 25, 0), max(c1[2] - 25, 0))
+            style_card(card, gradient_stops=[(0.0, c1), (1.0, c2)],
+                       shadow_preset="card", corner_radius=8000)
 
         tf = card.text_frame
         tf.word_wrap = True
@@ -1257,7 +1275,9 @@ def _render_hierarchy(slide, pos, items, has_tpl: bool = False):
             MSO_SHAPE.ROUNDED_RECTANGLE, pos.left + indent, y, w, item_height
         )
         _apply_accent_fill(shape, i, has_tpl)
-        shape.line.fill.background()
+        add_shadow(shape, preset="subtle")
+        set_corner_radius(shape, 8000)
+        remove_outline(shape)
 
         # Vertical connector to next level
         if i < n - 1:
