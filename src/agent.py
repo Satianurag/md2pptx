@@ -174,7 +174,10 @@ def validate_node(state: PipelineState) -> dict:
         return {"errors": state.get("errors", []) + ["No presentation_spec to validate"]}
 
     content_profile = state.get("content_profile")
-    result = validate_and_fix(spec, content_profile)
+    master_info = state.get("master_info")
+    sw = master_info.slide_width if master_info else None
+    sh = master_info.slide_height if master_info else None
+    result = validate_and_fix(spec, content_profile, slide_width=sw, slide_height=sh, master_info=master_info)
 
     warnings = state.get("warnings", []) + result.warnings
 
@@ -238,12 +241,16 @@ def _rule_based_plan_fallback(tree: ContentTree, target: int = 12) -> SlidePlan:
     slides = [SlidePlanItem(slide_number=1, slide_type="cover", title=tree.title or "Presentation",
                             subtitle=tree.subtitle)]
     idx = 2
+    # Agenda slide
+    slides.append(SlidePlanItem(slide_number=idx, slide_type="agenda",
+                                title="Agenda", visualization_hint="bullets"))
+    idx += 1
     if tree.executive_summary:
         slides.append(SlidePlanItem(slide_number=idx, slide_type="executive_summary",
                                     title="Executive Summary", visualization_hint="bullets"))
         idx += 1
     # Section slides
-    max_sections = min(len(tree.sections), target - 3)  # reserve agenda + conclusion + thank_you
+    max_sections = min(len(tree.sections), target - 4)  # reserve cover + agenda + conclusion + thank_you
     for sec in tree.sections[:max_sections]:
         hint = "bullets"
         if sec.tables:

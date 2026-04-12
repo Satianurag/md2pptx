@@ -1,6 +1,7 @@
 from __future__ import annotations
 import logging
 import json
+import math
 import re
 from typing import Optional
 from .schemas import (
@@ -12,31 +13,46 @@ from .schemas import (
 )
 from .content_profiler import ContentProfile
 from .llm import invoke_llm
-from .grid_system import grid
+from .grid_system import Grid
 from . import config
 
 logger = logging.getLogger(__name__)
 
 
 def _smart_truncate(text: str, max_chars: int = 200) -> str:
-    """Truncate text at a word boundary, never mid-word. Appends '…' only if truncated."""
+    """Truncate text intelligently, preferring sentence boundaries over mid-word cuts.
+
+    Strategy:
+    1. If text fits, return as-is.
+    2. Try to end at the last sentence boundary (. ! ?) within the limit.
+    3. Fall back to word-boundary cut only when no sentence boundary exists.
+    """
     text = text.strip()
     if len(text) <= max_chars:
         return text
-    # Find the last space before the limit
-    truncated = text[:max_chars]
-    last_space = truncated.rfind(' ')
-    if last_space > max_chars * 0.6:  # only break at word if we keep >60% of content
-        truncated = truncated[:last_space]
-    return truncated.rstrip('.,;:- ') + '…'
+
+    # Try sentence-boundary truncation: find last sentence-ending punctuation
+    # that occurs before max_chars
+    candidate = text[:max_chars]
+    last_sentence_end = -1
+    for m in re.finditer(r'[.!?](?:\s|$)', candidate):
+        pos = m.start() + 1  # include the punctuation
+        if pos <= max_chars:
+            last_sentence_end = pos
+
+    # Use sentence boundary if it preserves at least 40% of allowed length
+    if last_sentence_end > max_chars * 0.4:
+        return text[:last_sentence_end].strip()
+
+    # Fall back to word-boundary cut
+    last_space = candidate.rfind(' ')
+    if last_space > max_chars * 0.6:
+        candidate = candidate[:last_space]
+    return candidate.rstrip('.,;:- ') + '…'
 
 
-# ── Grid-based position presets ──
-POS_FULL = grid.full()
-POS_LEFT_HALF, POS_RIGHT_HALF = grid.two_column()
-POS_TOP_HALF, POS_BOTTOM_HALF = grid.top_bottom()
-POS_CHART = grid.chart()
-POS_TABLE = grid.table()
+# Module-level grid instance — set at the start of generate_presentation_spec()
+_grid: Grid = Grid.default()
 
 
 SPEC_SYSTEM_PROMPT = """\
@@ -78,6 +94,9 @@ def generate_presentation_spec(
     content_profile: ContentProfile | None = None,
 ) -> PresentationSpec:
     """Convert a SlidePlan + ContentTree into a full PresentationSpec."""
+    global _grid
+    _grid = Grid.from_template(master_info) if master_info else Grid.default()
+    logger.info(f"Grid: {_grid.slide_w}x{_grid.slide_h}, content_w={_grid.content_w}, content_h={_grid.content_h}")
 
     slides: list[SlideSpec] = []
 
@@ -185,7 +204,7 @@ def _build_support_chart_slide(
         elements=[
             SlideElement(
                 element_type="chart",
-                position=POS_CHART,
+                position=_grid.chart(),
                 content=ChartContent(
                     chart_type=_auto_detect_chart_type(table),
                     title=table.title or title,
@@ -209,7 +228,7 @@ def _build_support_table_slide(table: DataTable) -> SlideSpec:
         elements=[
             SlideElement(
                 element_type="table",
-                position=POS_TABLE,
+                position=_grid.table(),
                 content=TableContent(headers=headers, rows=rows),
             )
         ],
@@ -270,13 +289,27 @@ def _build_thank_you_slide(plan: SlidePlanItem) -> SlideSpec:
 
 def _build_divider_slide(plan: SlidePlanItem) -> SlideSpec:
     subtitle = plan.subtitle or plan.key_message or ""
+    elements = []
+
+    # Add key message as a text element so dividers aren't empty
+    if plan.key_message and plan.key_message.strip():
+        elements.append(SlideElement(
+            element_type="text",
+            position=_grid.full(),
+            content=TextContent(
+                text=_smart_truncate(plan.key_message, 200),
+                font_size=14,
+                italic=True,
+            ),
+        ))
+
     return SlideSpec(
         slide_number=plan.slide_number,
         slide_type="section_divider",
         layout_name="divider",
         title=plan.title,
         subtitle=subtitle,
-        elements=[],
+        elements=elements,
     )
 
 
@@ -329,6 +362,51 @@ def _sections_to_text(sections: list[ContentSection], tree: ContentTree) -> str:
     return result
 
 
+def _parse_number(s: str) -> float:
+    """Parse a string into a float, handling currency/percent/comma formats.
+
+    Returns ``math.nan`` for non-numeric values like 'N/A', empty strings,
+    or purely textual content — so callers can distinguish missing data
+    from a genuine zero.
+    """
+    s = str(s).strip()
+    if not s or s.upper() in ('N/A', 'NA', '-', '—', 'N.A.', 'N.A', 'NULL', 'NONE', 'TBD', 'TBC'):
+        return math.nan
+    s = re.sub(r'[,$€£%]', '', s)
+    s = s.replace(' ', '')
+    try:
+        # Handle B/M/K suffixes
+        if s.upper().endswith('B'):
+            return float(s[:-1]) * 1_000_000_000
+        elif s.upper().endswith('M'):
+            return float(s[:-1]) * 1_000_000
+        elif s.upper().endswith('K'):
+            return float(s[:-1]) * 1_000
+        elif s.upper().endswith('T'):
+            return float(s[:-1]) * 1_000_000_000_000
+        return float(s)
+    except (ValueError, IndexError):
+        return math.nan
+
+
+def _is_numeric_column(table: DataTable, col_idx: int) -> bool:
+    """Return True if > 40% of non-empty cells in *col_idx* are numeric."""
+    total = 0
+    numeric = 0
+    for row in table.rows:
+        if col_idx < len(row):
+            cell = str(row[col_idx]).strip()
+            if not cell:
+                continue
+            total += 1
+            val = _parse_number(cell)
+            if not math.isnan(val):
+                numeric += 1
+    if total == 0:
+        return False
+    return numeric / total > 0.40
+
+
 def _should_render_as_table(table: DataTable) -> bool:
     """Return True when a DataTable is better shown as a table than a chart.
 
@@ -344,13 +422,7 @@ def _should_render_as_table(table: DataTable) -> bool:
     # Count how many data columns are predominantly numeric
     numeric_cols = 0
     for col_idx in range(1, n_cols):  # skip first (category) column
-        nums = 0
-        for row in table.rows:
-            if col_idx < len(row):
-                val = _parse_number(str(row[col_idx]))
-                if val != 0 or str(row[col_idx]).strip() in ("0", "0.0", "0%"):
-                    nums += 1
-        if nums > len(table.rows) * 0.5:
+        if _is_numeric_column(table, col_idx):
             numeric_cols += 1
 
     text_cols = max(n_cols - 1 - numeric_cols, 0)
@@ -548,7 +620,7 @@ def _build_agenda_slide(plan: SlidePlanItem, tree: ContentTree) -> SlideSpec:
     if items:
         elements.append(SlideElement(
             element_type="bullets",
-            position=POS_FULL,
+            position=_grid.full(),
             content=BulletContent(items=items[:8], font_size=14),
         ))
 
@@ -576,7 +648,7 @@ def _build_exec_summary_slide(plan: SlidePlanItem, tree: ContentTree) -> SlideSp
             key_points = [_smart_truncate(p, config.MAX_CHARS_PER_BULLET) for p in key_points]
             elements.append(SlideElement(
                 element_type="bullets",
-                position=POS_FULL,
+                position=_grid.full(),
                 content=BulletContent(items=key_points, font_size=13),
             ))
 
@@ -609,10 +681,29 @@ def _build_bullets_slide(plan: SlidePlanItem, sections: list[ContentSection]) ->
     bullets = [_smart_truncate(b, config.MAX_CHARS_PER_BULLET) for b in bullets[:config.MAX_BULLETS_PER_SLIDE]]
 
     elements = []
-    if bullets:
+
+    # Layout variety: use sidebar_main when a key_message exists
+    key_msg = plan.key_message.strip() if plan.key_message else ""
+    if key_msg and bullets and len(bullets) >= 3:
+        pos_side, pos_main = _grid.sidebar_main()
+        elements.append(SlideElement(
+            element_type="text",
+            position=pos_side,
+            content=TextContent(
+                text=_smart_truncate(key_msg, 180),
+                font_size=13,
+                italic=True,
+            ),
+        ))
         elements.append(SlideElement(
             element_type="bullets",
-            position=POS_FULL,
+            position=pos_main,
+            content=BulletContent(items=bullets, font_size=14),
+        ))
+    elif bullets:
+        elements.append(SlideElement(
+            element_type="bullets",
+            position=_grid.full(),
             content=BulletContent(items=bullets, font_size=14),
         ))
 
@@ -693,7 +784,7 @@ def _build_chart_slide(plan: SlidePlanItem, sections: list[ContentSection]) -> S
     elements = [
         SlideElement(
             element_type="chart",
-            position=POS_CHART,
+            position=_grid.chart(),
             content=ChartContent(
                 chart_type=chart_type,
                 title=table.title or plan.title,
@@ -714,48 +805,61 @@ def _build_chart_slide(plan: SlidePlanItem, sections: list[ContentSection]) -> S
 
 
 def _extract_chart_data(table: DataTable) -> tuple[list[str], list[ChartSeries]]:
-    """Extract chart-friendly data from a DataTable."""
+    """Extract chart-friendly data from a DataTable.
+
+    Improvements over the naive 'first-col = categories, rest = series':
+    1. Skips text-heavy columns that aren't chartable (e.g. 'Bank', 'Year').
+    2. Handles N/A / missing values — rows where ALL numeric cells are NaN
+       are dropped; remaining NaN values become 0.0.
+    """
     if len(table.headers) < 2 or not table.rows:
         return [], []
 
-    # Strategy: first column = categories, remaining columns = series
-    categories = []
-    value_columns: dict[str, list[float]] = {h: [] for h in table.headers[1:]}
+    # Identify which columns (index ≥ 1) are genuinely numeric
+    numeric_col_indices: list[int] = []
+    for col_idx in range(1, len(table.headers)):
+        if _is_numeric_column(table, col_idx):
+            numeric_col_indices.append(col_idx)
+
+    if not numeric_col_indices:
+        return [], []
+
+    # First column = categories; collect values only from numeric columns
+    raw_categories: list[str] = []
+    raw_values: dict[int, list[float]] = {ci: [] for ci in numeric_col_indices}
 
     for row in table.rows[:20]:  # cap rows
         if not row:
             continue
-        categories.append(str(row[0])[:30])
-        for i, header in enumerate(table.headers[1:], 1):
-            val = _parse_number(row[i] if i < len(row) else "0")
-            value_columns[header].append(val)
+        raw_categories.append(str(row[0])[:30])
+        for ci in numeric_col_indices:
+            val = _parse_number(row[ci] if ci < len(row) else "")
+            raw_values[ci].append(val)
+
+    # Filter out rows where ALL numeric values are NaN (pure missing data)
+    keep_mask = []
+    for row_idx in range(len(raw_categories)):
+        has_value = any(
+            not math.isnan(raw_values[ci][row_idx]) for ci in numeric_col_indices
+        )
+        keep_mask.append(has_value)
+
+    categories = [c for c, keep in zip(raw_categories, keep_mask) if keep]
+    if not categories:
+        return [], []
 
     series_list = []
-    for name, values in value_columns.items():
+    for ci in numeric_col_indices:
+        name = table.headers[ci][:30]
+        values = [
+            (0.0 if math.isnan(v) else v)
+            for v, keep in zip(raw_values[ci], keep_mask)
+            if keep
+        ]
         if any(v != 0 for v in values):  # skip all-zero series
-            series_list.append(ChartSeries(name=name[:30], values=values))
+            series_list.append(ChartSeries(name=name, values=values))
 
     return categories, series_list
-
-
-def _parse_number(s: str) -> float:
-    """Parse a string into a float, handling currency/percent/comma formats."""
-    s = str(s).strip()
-    s = re.sub(r'[,$€£%]', '', s)
-    s = s.replace(' ', '')
-    try:
-        # Handle B/M/K suffixes
-        if s.upper().endswith('B'):
-            return float(s[:-1]) * 1_000_000_000
-        elif s.upper().endswith('M'):
-            return float(s[:-1]) * 1_000_000
-        elif s.upper().endswith('K'):
-            return float(s[:-1]) * 1_000
-        elif s.upper().endswith('T'):
-            return float(s[:-1]) * 1_000_000_000_000
-        return float(s)
-    except (ValueError, IndexError):
-        return 0.0
 
 
 def _build_table_slide(plan: SlidePlanItem, sections: list[ContentSection]) -> SlideSpec | None:
@@ -779,7 +883,7 @@ def _build_table_slide(plan: SlidePlanItem, sections: list[ContentSection]) -> S
     elements = [
         SlideElement(
             element_type="table",
-            position=POS_TABLE,
+            position=_grid.table(),
             content=TableContent(headers=headers, rows=rows),
         )
     ]
@@ -823,7 +927,7 @@ def _build_kpi_slide(
     elements = [
         SlideElement(
             element_type="infographic",
-            position=POS_FULL,
+            position=_grid.full(),
             content=InfographicContent(
                 infographic_type="kpi_cards",
                 items=items,
@@ -870,7 +974,7 @@ def _build_infographic_slide(plan: SlidePlanItem, sections: list[ContentSection]
     elements = [
         SlideElement(
             element_type="infographic",
-            position=POS_FULL,
+            position=_grid.full(),
             content=InfographicContent(
                 infographic_type=infographic_type,
                 items=items[:6],
@@ -921,7 +1025,7 @@ def _build_infographic_slide_with_type(
     elements = [
         SlideElement(
             element_type="infographic",
-            position=POS_FULL,
+            position=_grid.full(),
             content=InfographicContent(
                 infographic_type=infographic_type,
                 items=items[:6],
@@ -964,9 +1068,10 @@ def _build_mixed_slide(
                 series_list = _extract_chart_series(t, chart_type)
                 if series_list:
                     categories = [str(row[0]) for row in t.rows[:8]] if t.rows else []
+                    pos_left, pos_right = _grid.two_column()
                     chart_elem = SlideElement(
                         element_type="chart",
-                        position=POS_LEFT_HALF,
+                        position=pos_left,
                         content=ChartContent(
                             chart_type=chart_type,
                             title="",
@@ -995,9 +1100,10 @@ def _build_mixed_slide(
                         description=_smart_truncate(parts[1].strip(), 80) if len(parts) > 1 else "",
                     ))
         if inf_items:
+            pos_left, pos_right = _grid.two_column()
             chart_elem = SlideElement(
                 element_type="infographic",
-                position=POS_LEFT_HALF,
+                position=pos_left,
                 content=InfographicContent(
                     infographic_type="comparison",
                     items=inf_items[:4],
@@ -1013,7 +1119,7 @@ def _build_mixed_slide(
     if bullets:
         elements.append(SlideElement(
             element_type="bullets",
-            position=POS_RIGHT_HALF if chart_elem else POS_FULL,
+            position=_grid.two_column()[1] if chart_elem else _grid.full(),
             content=BulletContent(items=bullets, font_size=13),
         ))
 
@@ -1075,7 +1181,8 @@ def _build_conclusion_slide(
         normalized = bullet.strip().lstrip("•-").strip()
         if not normalized:
             continue
-        key = normalized.lower()
+        # Fuzzy dedup: first 40 chars to avoid over-filtering
+        key = normalized.lower()[:40]
         if key in seen:
             continue
         seen.add(key)
@@ -1099,22 +1206,36 @@ def _build_conclusion_slide(
             elif sec.text:
                 sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', sec.text) if s.strip()]
                 candidate = sentences[0] if sentences else ""
-            key = candidate.lower()
+            key = candidate.lower()[:40]
             if candidate and key not in seen:
                 seen.add(key)
                 cleaned.append(candidate)
             if len(cleaned) >= config.MAX_BULLETS_PER_SLIDE:
                 break
 
+    # Source 5: synthesize from section headings if still too few
+    if len(cleaned) < 3:
+        for sec in tree.sections[:8]:
+            heading = sec.heading.strip() if sec.heading else ""
+            if heading:
+                synth = f"Key findings in {heading}"
+                key = synth.lower()[:40]
+                if key not in seen:
+                    seen.add(key)
+                    cleaned.append(synth)
+            if len(cleaned) >= config.MAX_BULLETS_PER_SLIDE:
+                break
+
     if not cleaned:
         cleaned = ["Key findings and strategic recommendations from this analysis"]
 
-    bullets = [_smart_truncate(b, config.MAX_CHARS_PER_BULLET) for b in cleaned[:config.MAX_BULLETS_PER_SLIDE]]
+    _max_chars = getattr(config, 'MAX_CONCLUSION_CHARS', config.MAX_CHARS_PER_BULLET)
+    bullets = [_smart_truncate(b, _max_chars) for b in cleaned[:config.MAX_BULLETS_PER_SLIDE]]
 
     elements = [
         SlideElement(
             element_type="bullets",
-            position=POS_FULL,
+            position=_grid.full(),
             content=BulletContent(items=bullets, font_size=14),
         )
     ]
@@ -1181,7 +1302,7 @@ def _parse_llm_slide_response(raw: str, plan_item: SlidePlanItem) -> SlideSpec:
         items = [_smart_truncate(str(b), config.MAX_CHARS_PER_BULLET) for b in data["bullets"][:config.MAX_BULLETS_PER_SLIDE]]
         elements.append(SlideElement(
             element_type="bullets",
-            position=POS_FULL,
+            position=_grid.full(),
             content=BulletContent(items=items, font_size=14),
         ))
 
@@ -1194,7 +1315,7 @@ def _parse_llm_slide_response(raw: str, plan_item: SlidePlanItem) -> SlideSpec:
         if series_list:
             elements.append(SlideElement(
                 element_type="chart",
-                position=POS_CHART,
+                position=_grid.chart(),
                 content=ChartContent(
                     chart_type=data.get("chart_type", "column"),
                     title=data.get("chart_title", ""),
@@ -1206,7 +1327,7 @@ def _parse_llm_slide_response(raw: str, plan_item: SlidePlanItem) -> SlideSpec:
     elif content_type == "table" and data.get("table_headers") and data.get("table_rows"):
         elements.append(SlideElement(
             element_type="table",
-            position=POS_TABLE,
+            position=_grid.table(),
             content=TableContent(
                 headers=[str(h)[:30] for h in data["table_headers"][:6]],
                 rows=[[str(c)[:30] for c in row[:6]] for row in data["table_rows"][:8]],
@@ -1226,14 +1347,14 @@ def _parse_llm_slide_response(raw: str, plan_item: SlidePlanItem) -> SlideSpec:
             inf_type = "kpi_cards"
         elements.append(SlideElement(
             element_type="infographic",
-            position=POS_FULL,
+            position=_grid.full(),
             content=InfographicContent(infographic_type=inf_type, items=items),
         ))
 
     elif content_type == "text" and data.get("text"):
         elements.append(SlideElement(
             element_type="text",
-            position=POS_FULL,
+            position=_grid.full(),
             content=TextContent(text=data["text"][:500], font_size=14),
         ))
 
@@ -1244,7 +1365,7 @@ def _parse_llm_slide_response(raw: str, plan_item: SlidePlanItem) -> SlideSpec:
             items = [_smart_truncate(str(b), config.MAX_CHARS_PER_BULLET) for b in bullets[:config.MAX_BULLETS_PER_SLIDE]]
             elements.append(SlideElement(
                 element_type="bullets",
-                position=POS_FULL,
+                position=_grid.full(),
                 content=BulletContent(items=items, font_size=14),
             ))
 
@@ -1264,7 +1385,7 @@ def _fallback_text_slide(plan_item: SlidePlanItem, source_text: str) -> SlideSpe
     elements = [
         SlideElement(
             element_type="text",
-            position=POS_FULL,
+            position=_grid.full(),
             content=TextContent(text=text, font_size=14),
         )
     ]

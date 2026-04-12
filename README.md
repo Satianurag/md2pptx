@@ -79,8 +79,9 @@ python main.py --input path/to/test_cases/ --batch
 8. **Theme color inheritance** — all fills use MSO_THEME_COLOR (schemeClr XML) when template loaded, inheriting slide master palette. Fallback hex only without template.
 9. **Chart-first detection** — auto-detects chartable table data and upgrades bullet slides to mixed/chart; guarantees at least 1 chart per presentation if numeric data exists
 10. **Fuzzy template matching** — word-overlap scoring matches markdown filenames to templates
-11. **LangGraph RetryPolicy** — exponential backoff (2s→30s) with jitter on LLM nodes for transient failures
-12. **Error isolation** — per-element try/except in renderer; validation warnings instead of blocking errors
+11. **Template Bookend System** — when a template has ≥2 slides, the first and last are treated as fixed bookends. The cover slide gets only title/subtitle filled into placeholders (no accent bars or extra shapes). The closing slide is added with zero modifications, preserving baked-in designs like "Thank You!". Layout **index** (not name) is used for selection because templates can have duplicate layout names pointing to different designs. Content slides are prevented from using the closing layout via `excluded_idx`.
+12. **LangGraph RetryPolicy** — exponential backoff (2s→30s) with jitter on LLM nodes for transient failures
+13. **Error isolation** — per-element try/except in renderer; validation warnings instead of blocking errors
 
 ## Tech Stack
 
@@ -106,21 +107,30 @@ python main.py --input path/to/test_cases/ --batch
 
 ```
 md2pptx/
-├── main.py              # CLI entry point (single + batch mode)
-├── requirements.txt     # Dependencies (all latest versions)
-├── .env.example         # API key template
-├── output/              # Generated .pptx files
+├── main.py                # CLI entry point (single + batch mode)
+├── requirements.txt       # Dependencies (all latest versions)
+├── .env.example           # API key template
+├── output/                # Generated .pptx files
+├── test_cases/            # 24 markdown research reports for testing
+├── templates/             # 3 PPTX slide master templates
+├── scripts/
+│   ├── capture_slides.py  # PPTX → PDF → PNG screenshot tool
+│   └── verify_output.py   # Automated quality checks (contrast, overflow, structure)
 └── src/
-    ├── agent.py         # LangGraph StateGraph + RetryPolicy + rule-based fallback
-    ├── config.py        # Constants, margins, typography, slide limits
+    ├── agent.py           # LangGraph StateGraph + RetryPolicy + rule-based fallback
+    ├── color_utils.py     # WCAG 2.1 contrast utilities, text color picker
+    ├── components.py      # Card-based bullet rendering, accent shapes
+    ├── config.py          # Constants, margins, typography, slide limits
     ├── content_chunker.py # Tiered chunking (standard/moderate/aggressive)
-    ├── grid_system.py   # 9-preset grid alignment system
-    ├── llm.py           # Gemini wrapper + rate limiter + structured output
+    ├── content_profiler.py # Content archetype detection (financial, narrative, etc.)
+    ├── drawingml_effects.py # Shadows, gradients, rounded corners, card styling
+    ├── grid_system.py     # 9-preset grid alignment system
+    ├── llm.py             # Gemini wrapper + rate limiter + structured output
     ├── markdown_parser.py # Mistune markdown → ContentTree
-    ├── pptx_renderer.py # Rich PPTX renderer (cards, infographics, furniture)
-    ├── schemas.py       # 15+ Pydantic data models
-    ├── slide_master.py  # Template reading, theme extraction, fuzzy matching
-    ├── slide_planner.py # AI slide storyline planning
-    ├── spec_generator.py # Rule-based + AI spec gen, infographic-first, chart-first
-    └── validator.py     # Content density, bounds, chart/table auto-fix
+    ├── pptx_renderer.py   # Rich PPTX renderer (bookends, cards, infographics)
+    ├── schemas.py         # 15+ Pydantic data models
+    ├── slide_master.py    # Template reading, theme extraction, fuzzy matching
+    ├── slide_planner.py   # AI slide storyline planning
+    ├── spec_generator.py  # Rule-based + AI spec gen, infographic-first, chart-first
+    └── validator.py       # Content density, bounds, chart/table auto-fix
 ```

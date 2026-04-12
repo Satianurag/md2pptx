@@ -1,25 +1,33 @@
 """Grid alignment system for snapping slide elements to consistent positions."""
 from __future__ import annotations
-from .schemas import Position
+import logging
+from .schemas import Position, SlideMasterInfo
 from . import config
 
+logger = logging.getLogger(__name__)
 
-# Minimum gap between adjacent elements (EMU)
-_MIN_GAP = 160000
+# Minimum gap between adjacent elements (EMU) — per Guidelines §5 "breathing space"
+_MIN_GAP = int(config.SHAPE_GAP)
+# Footer zone: bottom 12 % of slide is reserved for footers / slide number
+_FOOTER_ZONE_RATIO = 0.12
 
 
 class Grid:
-    """Provides layout presets based on slide dimensions and margins."""
+    """Provides layout presets based on slide dimensions and margins.
+
+    Never import this at module level with hardcoded config values.
+    Use the factory methods ``Grid.default()`` or ``Grid.from_template()``.
+    """
 
     def __init__(
         self,
-        slide_w: int = config.SLIDE_WIDTH,
-        slide_h: int = config.SLIDE_HEIGHT,
-        m_left: int = int(config.MARGIN_LEFT),
-        m_right: int = int(config.MARGIN_RIGHT),
-        m_top: int = int(config.MARGIN_TOP),
-        m_bottom: int = int(config.MARGIN_BOTTOM),
-        content_top: int = int(config.CONTENT_TOP),
+        slide_w: int,
+        slide_h: int,
+        m_left: int,
+        m_right: int,
+        m_top: int,
+        m_bottom: int,
+        content_top: int,
     ):
         self.slide_w = slide_w
         self.slide_h = slide_h
@@ -32,6 +40,75 @@ class Grid:
         self.content_w = slide_w - m_left - m_right
         self.content_h = slide_h - content_top - m_bottom
 
+    # ── Factory methods ──────────────────────────────────────────────
+
+    @classmethod
+    def default(cls) -> "Grid":
+        """Grid using the 16:9 defaults from config (no template)."""
+        return cls(
+            slide_w=config.SLIDE_WIDTH,
+            slide_h=config.SLIDE_HEIGHT,
+            m_left=int(config.MARGIN_LEFT),
+            m_right=int(config.MARGIN_RIGHT),
+            m_top=int(config.MARGIN_TOP),
+            m_bottom=int(config.MARGIN_BOTTOM),
+            content_top=int(config.DEFAULT_CONTENT_TOP),
+        )
+
+    @classmethod
+    def from_template(cls, master_info: SlideMasterInfo) -> "Grid":
+        """Build a Grid that adapts to the template's actual dimensions.
+
+        Content top is inferred from the 'title_only' layout placeholder
+        positions (title bottom + gap).  Content bottom is inferred from
+        footer placeholders or the default margin.
+        """
+        slide_w = master_info.slide_width or config.SLIDE_WIDTH
+        slide_h = master_info.slide_height or config.SLIDE_HEIGHT
+
+        m_left = int(config.MARGIN_LEFT)
+        m_right = int(config.MARGIN_RIGHT)
+        m_top = int(config.MARGIN_TOP)
+
+        # --- Derive content_top from title placeholder ---
+        content_top = int(config.DEFAULT_CONTENT_TOP)
+        footer_top = slide_h  # assume no footer
+
+        for layout in master_info.layouts:
+            if layout.category in ("title_only", "title_content"):
+                for ph in layout.placeholders:
+                    ph_type = (ph.ph_type or "").upper()
+                    # Title / subtitle — content starts below the lowest title placeholder
+                    if ph_type in ("TITLE", "CENTER_TITLE", "SUBTITLE"):
+                        bottom = ph.top + ph.height
+                        candidate = bottom + 100000  # 100k EMU gap
+                        if candidate > content_top:
+                            content_top = candidate
+                    # Footer / slide-number — content must end above the highest footer
+                    if ph_type in ("SLIDE_NUMBER", "FOOTER", "DATE_TIME", "BODY"):
+                        # "BODY" placeholders in the bottom 15 % of slide are footers
+                        if ph.top > slide_h * 0.80:
+                            if ph.top < footer_top:
+                                footer_top = ph.top
+                break  # use only the first matching layout
+
+        # Determine bottom margin from footer zone
+        if footer_top < slide_h:
+            m_bottom = slide_h - footer_top + 50000  # 50k EMU padding above footer
+        else:
+            m_bottom = int(config.MARGIN_BOTTOM)
+
+        logger.debug(
+            f"Grid.from_template: slide={slide_w}x{slide_h}, "
+            f"content_top={content_top}, m_bottom={m_bottom}"
+        )
+        return cls(
+            slide_w=slide_w, slide_h=slide_h,
+            m_left=m_left, m_right=m_right,
+            m_top=m_top, m_bottom=m_bottom,
+            content_top=content_top,
+        )
+
     # ── Single-zone presets ──────────────────────────────────────────
 
     def full(self) -> Position:
@@ -43,7 +120,7 @@ class Grid:
 
     def chart(self) -> Position:
         """Slightly inset area optimized for charts."""
-        inset = 250000
+        inset = min(250000, self.content_w // 20)
         return Position(
             left=self.m_left + inset,
             top=self.content_top + 120000,
@@ -150,6 +227,37 @@ class Grid:
         )
         return top, bl, br
 
+    def n_cards(self, n: int, max_cols: int = 4, max_rows: int = 2) -> list[Position]:
+        """Evenly-spaced card grid for *n* items (used by KPI, comparison, etc.).
 
-# Module-level singleton
-grid = Grid()
+        Caps layout to *max_rows* rows to prevent vertical congestion.
+        """
+        cols = min(n, max_cols)
+        rows = min((n + cols - 1) // cols, max_rows)
+        # Re-cap n so we don't render cards that won't fit
+        n = min(n, cols * rows)
+
+        gap_h = _MIN_GAP
+        gap_v = _MIN_GAP
+        card_w = max(
+            (self.content_w - gap_h * max(cols - 1, 0)) // max(cols, 1),
+            1500000,  # minimum card width ~1.65 in
+        )
+        card_h = min(
+            max(
+                (self.content_h - gap_v * max(rows - 1, 0)) // max(rows, 1),
+                800000,  # minimum card height ~0.88 in
+            ),
+            self.content_h // 2,
+        )
+        positions: list[Position] = []
+        for idx in range(n):
+            col = idx % cols
+            row = idx // cols
+            positions.append(Position(
+                left=self.m_left + col * (card_w + gap_h),
+                top=self.content_top + row * (card_h + gap_v),
+                width=card_w,
+                height=card_h,
+            ))
+        return positions

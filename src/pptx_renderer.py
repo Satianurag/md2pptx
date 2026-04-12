@@ -1,6 +1,19 @@
+"""Rich PPTX renderer with template bookend system.
+
+When a template has ≥2 slides, the first and last are treated as fixed bookends:
+- **Cover** (first slide layout): title/subtitle filled into placeholders only —
+  no accent bars, no extra shapes.  Preserves template design.
+- **Closing** (last slide layout): added with zero modifications — baked-in
+  "Thank You!" text in the layout is preserved automatically.
+
+Layout **index** (not name) is used for bookend selection because templates can
+have multiple layouts with the same name but different designs.  Content slides
+are prevented from accidentally using the closing layout via ``excluded_idx``.
+"""
 from __future__ import annotations
 import re
 from pathlib import Path
+from lxml import etree
 from pptx import Presentation
 from pptx.util import Inches, Pt, Emu
 from pptx.dml.color import RGBColor
@@ -9,6 +22,7 @@ from pptx.enum.shapes import MSO_SHAPE
 from pptx.enum.dml import MSO_THEME_COLOR
 from pptx.enum.chart import XL_CHART_TYPE, XL_LEGEND_POSITION, XL_LABEL_POSITION
 from pptx.chart.data import CategoryChartData, XyChartData
+from pptx.oxml.ns import qn
 
 from .schemas import (
     PresentationSpec, SlideSpec, SlideElement,
@@ -23,9 +37,24 @@ from .drawingml_effects import (
     style_accent_bar, style_numbered_circle,
 )
 from .components import render_chart_container, render_accent_divider
+from .color_utils import (
+    FALLBACK_ACCENT_HEX, FLOW_ACCENT_HEX, CMP_ACCENT_HEX, KPI_ACCENT_HEX,
+    pick_text_color, darken_hex,
+)
 
 import logging
 _log = logging.getLogger(__name__)
+
+# Module-level slide dimensions — set at the start of render_presentation()
+_sw: int = config.SLIDE_WIDTH
+_sh: int = config.SLIDE_HEIGHT
+
+# Placeholder types that must NEVER be removed (footers, slide numbers, dates)
+_PROTECTED_PH_TYPES = frozenset({
+    12,  # SLIDE_NUMBER
+    11,  # DATE_TIME
+    10,  # FOOTER
+})
 
 
 # ── Chart type mapping ──
@@ -76,10 +105,8 @@ _ACCENT_THEME_COLORS = [
     MSO_THEME_COLOR.ACCENT_5, MSO_THEME_COLOR.ACCENT_6,
 ]
 
-# Fallback hex palette (only used when no template is loaded)
-_FALLBACK_ACCENT_HEX = [
-    "4472C4", "ED7D31", "A5A5A5", "FFC000", "5B9BD5", "70AD47",
-]
+# Fallback hex palette — WCAG-compliant (≥4.5:1 vs white text)
+_FALLBACK_ACCENT_HEX = FALLBACK_ACCENT_HEX
 
 
 def _apply_accent_fill(shape, index: int, has_template: bool) -> None:
@@ -100,9 +127,20 @@ def _get_accent_hex(master_info: SlideMasterInfo | None, index: int) -> str:
 
 
 def _remove_unused_placeholders(slide) -> None:
-    """Remove all placeholder shapes that have no user-supplied text.
-    Prevents ghost text from template placeholders bleeding through."""
+    """Remove placeholder shapes that have no user-supplied text.
+
+    Preserves footer, slide-number, and date-time placeholders so that
+    the template's built-in furniture is not destroyed.
+    """
     for shape in list(slide.placeholders):
+        ph_idx = shape.placeholder_format.idx
+        ph_type = shape.placeholder_format.type  # int enum
+        # Never remove protected placeholders
+        if int(ph_type) in _PROTECTED_PH_TYPES or ph_idx in (10, 11, 12):
+            continue
+        # Also skip any placeholder in the bottom 15% (likely footer zone)
+        if hasattr(shape, 'top') and shape.top > _sh * 0.85:
+            continue
         if shape.has_text_frame:
             text = shape.text_frame.text.strip() if shape.text_frame.text else ""
             if not text:
@@ -110,16 +148,18 @@ def _remove_unused_placeholders(slide) -> None:
                     sp = shape._element
                     sp.getparent().remove(sp)
                 except Exception:
-                    pass  # some placeholders can't be removed (e.g. slide number)
+                    pass
 
 
-def _set_autofit(text_frame) -> None:
-    """Disable auto-size and enable word wrap for predictable text layout.
+def _set_autofit(text_frame, *, shrink_ok: bool = False) -> None:
+    """Set auto-size mode for a text frame.
 
-    Using NONE + word_wrap avoids PowerPoint shrinking text to unreadable
-    sizes.  Text that overflows is clipped rather than distorted.
+    *shrink_ok=True* enables TEXT_TO_FIT_SHAPE for bounded shapes (cards,
+    badges) so that long text shrinks instead of overflowing.
     """
-    text_frame.auto_size = MSO_AUTO_SIZE.NONE
+    text_frame.auto_size = (
+        MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE if shrink_ok else MSO_AUTO_SIZE.NONE
+    )
     text_frame.word_wrap = True
 
 
@@ -232,38 +272,93 @@ def _add_speaker_notes(slide, text: str) -> None:
 
 def render_presentation(spec: PresentationSpec, output_path: str | Path) -> Path:
     """Render a full presentation from PresentationSpec to .pptx file."""
+    global _sw, _sh
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     template_path = spec.template_path
+    first_slide_layout_idx = None
+    last_slide_layout_idx = None
+
     if template_path and Path(template_path).exists():
         prs = Presentation(str(template_path))
+
+        # Capture layout indices from first and last slides before removing them.
+        # We use index (not name) because templates can have duplicate layout names
+        # pointing to different designs (e.g. UAE template has 3 layouts named the
+        # same, but only index 4 contains the "Thank you!" design).
+        if len(prs.slides) > 0:
+            first_slide_layout_idx = list(prs.slide_layouts).index(prs.slides[0].slide_layout)
+        if len(prs.slides) > 1:
+            last_slide_layout_idx = list(prs.slide_layouts).index(prs.slides[-1].slide_layout)
+
         # Remove existing slides from template (they're just examples)
         while len(prs.slides) > 0:
-            rId = prs.slides._sldIdLst[0].get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id')
-            if rId is None:
-                # Fallback: try different attribute access
-                slide_id = prs.slides._sldIdLst[0]
-                rId = slide_id.attrib.get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id')
-            if rId:
-                prs.part.drop_rel(rId)
-            prs.slides._sldIdLst.remove(prs.slides._sldIdLst[0])
+            rId = prs.slides._sldIdLst[-1].rId
+            prs.part.drop_rel(rId)
+            prs.slides._sldIdLst.remove(prs.slides._sldIdLst[-1])
     else:
         prs = Presentation()
+        prs.slide_width = config.SLIDE_WIDTH
+        prs.slide_height = config.SLIDE_HEIGHT
+
+    # Capture actual slide dimensions for the rest of the render chain
+    _sw = int(prs.slide_width)
+    _sh = int(prs.slide_height)
+    _log.info(f"Slide dimensions: {_sw}x{_sh} EMU ({_sw/914400:.2f}x{_sh/914400:.2f} in)")
 
     master_info = read_slide_master(template_path) if template_path and Path(template_path).exists() else None
 
-    for slide_spec in spec.slides:
-        _render_slide(prs, slide_spec, master_info, deck_title=spec.title)
+    # Template bookend mode: first and last slides come from the template
+    template_has_bookends = (first_slide_layout_idx is not None and last_slide_layout_idx is not None)
+
+    if template_has_bookends:
+        # 1. Add cover slide from template layout — fill title/subtitle only
+        _render_template_bookend_cover(prs, spec, first_slide_layout_idx)
+        # 2. Render content slides (skip cover and thank_you — they are bookends)
+        for slide_spec in spec.slides:
+            if slide_spec.slide_type in ("cover", "thank_you"):
+                continue
+            _render_slide(prs, slide_spec, master_info, deck_title=spec.title,
+                          excluded_layout_idx=last_slide_layout_idx)
+        # 3. Add closing slide from template layout — zero modifications
+        _render_template_bookend_closing(prs, last_slide_layout_idx)
+    else:
+        for slide_spec in spec.slides:
+            _render_slide(prs, slide_spec, master_info, deck_title=spec.title)
 
     prs.save(str(output_path))
     return output_path
 
 
-def _get_slide_layout(prs: Presentation, slide_spec: SlideSpec, master_info: SlideMasterInfo | None):
+def _render_template_bookend_cover(prs: Presentation, spec: PresentationSpec, layout_idx: int) -> None:
+    """Add the template's cover slide and fill only title/subtitle into placeholders."""
+    layout = prs.slide_layouts[layout_idx]
+    slide = prs.slides.add_slide(layout)
+
+    phs = sorted(slide.placeholders, key=lambda p: p.placeholder_format.idx)
+    if len(phs) >= 1 and spec.title:
+        phs[0].text = spec.title
+        _set_autofit(phs[0].text_frame)
+    if len(phs) >= 2 and spec.subtitle:
+        phs[1].text = spec.subtitle
+        _set_autofit(phs[1].text_frame)
+
+
+def _render_template_bookend_closing(prs: Presentation, layout_idx: int) -> None:
+    """Add the template's closing slide with zero modifications."""
+    layout = prs.slide_layouts[layout_idx]
+    prs.slides.add_slide(layout)
+
+
+
+
+def _get_slide_layout(prs: Presentation, slide_spec: SlideSpec, master_info: SlideMasterInfo | None,
+                      excluded_layout_idx: int | None = None):
     """Get the appropriate slide layout from the presentation."""
     if master_info:
-        layout_info = get_layout_for_slide_type(master_info, slide_spec.slide_type)
+        layout_info = get_layout_for_slide_type(master_info, slide_spec.slide_type,
+                                                excluded_idx=excluded_layout_idx)
         # Find the actual layout object by index
         master = prs.slide_masters[0]
         if layout_info.index < len(master.slide_layouts):
@@ -283,9 +378,9 @@ def _get_slide_layout(prs: Presentation, slide_spec: SlideSpec, master_info: Sli
 
 
 def _render_slide(prs: Presentation, spec: SlideSpec, master_info: SlideMasterInfo | None,
-                  deck_title: str = ""):
+                  deck_title: str = "", excluded_layout_idx: int | None = None):
     """Render a single slide."""
-    layout = _get_slide_layout(prs, spec, master_info)
+    layout = _get_slide_layout(prs, spec, master_info, excluded_layout_idx=excluded_layout_idx)
     slide = prs.slides.add_slide(layout)
     has_tpl = master_info is not None
 
@@ -363,18 +458,19 @@ def _render_cover(slide, spec: SlideSpec, master_info: SlideMasterInfo | None = 
         if len(ph_list) >= 2:
             _set_autofit(ph_list[1].text_frame)
     else:
+        cw = _sw - int(config.MARGIN_LEFT) - int(config.MARGIN_RIGHT)
         _add_textbox(slide, spec.title, config.MARGIN_LEFT, Emu(2400000),
-                     config.CONTENT_WIDTH, Emu(900000),
+                     cw, Emu(900000),
                      font_size=config.FONT_TITLE, bold=True, alignment="center")
         if spec.subtitle:
             _add_textbox(slide, spec.subtitle, config.MARGIN_LEFT, Emu(3500000),
-                         config.CONTENT_WIDTH, Emu(600000),
+                         cw, Emu(600000),
                          font_size=config.FONT_SUBTITLE, alignment="center")
 
     # Bottom accent bar on cover with gradient
     accent = slide.shapes.add_shape(
-        MSO_SHAPE.RECTANGLE, 0, config.SLIDE_HEIGHT - Emu(100000),
-        config.SLIDE_WIDTH, Emu(100000)
+        MSO_SHAPE.RECTANGLE, 0, _sh - Emu(100000),
+        _sw, Emu(100000)
     )
     if has_tpl:
         style_accent_bar(accent, theme_color=MSO_THEME_COLOR.ACCENT_1, angle=0.0)
@@ -388,6 +484,8 @@ def _render_cover(slide, spec: SlideSpec, master_info: SlideMasterInfo | None = 
 
 def _render_divider(slide, spec: SlideSpec, has_tpl: bool = False):
     """Render a section divider slide with title and optional subtitle."""
+    cw = _sw - int(config.MARGIN_LEFT) - int(config.MARGIN_RIGHT)
+    subtitle_handled = False
     phs = {ph.placeholder_format.idx: ph for ph in slide.placeholders}
     if phs:
         ph_list = sorted(phs.values(), key=lambda p: p.placeholder_format.idx)
@@ -399,14 +497,18 @@ def _render_divider(slide, spec: SlideSpec, has_tpl: bool = False):
             if spec.subtitle:
                 ph_list[1].text = spec.subtitle
                 _set_autofit(ph_list[1].text_frame)
+                subtitle_handled = True
             else:
                 try:
                     sp = ph_list[1]._element
                     sp.getparent().remove(sp)
                 except Exception:
                     ph_list[1].text = ""
-        # Remove any remaining unused placeholders
+        # Remove any remaining unused placeholders (except protected)
         for ph in ph_list[2:]:
+            ph_type = ph.placeholder_format.type
+            if int(ph_type) in _PROTECTED_PH_TYPES or ph.placeholder_format.idx in (10, 11, 12):
+                continue
             try:
                 sp = ph._element
                 sp.getparent().remove(sp)
@@ -414,21 +516,23 @@ def _render_divider(slide, spec: SlideSpec, has_tpl: bool = False):
                 ph.text = ""
     else:
         _add_textbox(slide, spec.title, config.MARGIN_LEFT, Emu(2700000),
-                     config.CONTENT_WIDTH, Emu(900000),
+                     cw, Emu(900000),
                      font_size=config.FONT_TITLE, bold=True, alignment="center")
 
-    # Subtitle textbox (if no placeholders handled it)
-    if spec.subtitle and not phs:
+    # Add subtitle as manual textbox when placeholders didn't handle it
+    if spec.subtitle and not subtitle_handled:
         _add_textbox(slide, spec.subtitle, config.MARGIN_LEFT, Emu(3700000),
-                     config.CONTENT_WIDTH, Emu(500000),
+                     cw, Emu(500000),
                      font_size=config.FONT_SUBTITLE, alignment="center", color="666666")
 
-    # Accent bar under title with gradient
+    # Accent bar under title with gradient — center it horizontally
     bar_y = Emu(4300000) if spec.subtitle else Emu(3800000)
+    bar_w = min(Emu(5000000), cw)
+    bar_x = int(config.MARGIN_LEFT) + (cw - bar_w) // 2
     bar = slide.shapes.add_shape(
         MSO_SHAPE.RECTANGLE,
-        config.MARGIN_LEFT + Emu(3000000), bar_y,
-        Emu(5000000), Emu(36000)
+        bar_x, bar_y,
+        bar_w, Emu(36000)
     )
     if has_tpl:
         style_accent_bar(bar, theme_color=MSO_THEME_COLOR.ACCENT_1, angle=0.0)
@@ -439,54 +543,49 @@ def _render_divider(slide, spec: SlideSpec, has_tpl: bool = False):
 
 def _render_thank_you(slide, spec: SlideSpec, master_info: SlideMasterInfo | None = None,
                       has_tpl: bool = False):
-    """Render thank you slide — use EITHER placeholders OR textboxes, never both."""
+    """Render thank you slide — use EITHER placeholders OR textboxes, never both.
+
+    When a template is loaded the layout already contains styled "Thank You"
+    text, so we leave the slide completely untouched to preserve the design.
+    """
+    if has_tpl:
+        # Template thank-you layouts usually have the text baked into layout
+        # shapes. However, some layouts have 0 placeholders and text may not
+        # be visible. Add a subtle insurance textbox if the slide is empty.
+        if len(list(slide.shapes)) == 0:
+            cw = _sw - int(config.MARGIN_LEFT) - int(config.MARGIN_RIGHT)
+            inset = min(Emu(600000), cw // 10)
+            _add_textbox(slide, spec.title or "Thank You",
+                         int(config.MARGIN_LEFT) + inset, Emu(2800000),
+                         cw - 2 * inset, Emu(800000),
+                         font_size=Pt(32), bold=True, alignment="center")
+        return
+
+    # No template — render manually
     title_text = spec.title or "Thank You"
     subtitle_text = spec.subtitle or "Questions & Discussion"
 
-    # Try placeholders first
-    phs = {ph.placeholder_format.idx: ph for ph in slide.placeholders}
-    used_phs = set()
-
-    if phs:
-        ph_list = sorted(phs.values(), key=lambda p: p.placeholder_format.idx)
-        # Fill title placeholder
-        if len(ph_list) >= 1:
-            ph_list[0].text = title_text
-            _set_autofit(ph_list[0].text_frame)
-            used_phs.add(ph_list[0].placeholder_format.idx)
-        # Fill subtitle placeholder
-        if len(ph_list) >= 2:
-            ph_list[1].text = subtitle_text
-            _set_autofit(ph_list[1].text_frame)
-            used_phs.add(ph_list[1].placeholder_format.idx)
-        # Remove ALL unused placeholders — this prevents ghost text
-        for ph in ph_list:
-            if ph.placeholder_format.idx not in used_phs:
-                try:
-                    sp = ph._element
-                    sp.getparent().remove(sp)
-                except Exception:
-                    ph.text = ""
-    else:
-        # No placeholders at all — use manual textboxes
-        _remove_text_artifacts(slide)
-        _add_textbox(slide, title_text, config.MARGIN_LEFT + Emu(600000), Emu(2300000),
-                     config.CONTENT_WIDTH - Emu(1200000), Emu(900000),
-                     font_size=Pt(36), bold=True, alignment="center")
-        _add_textbox(slide, subtitle_text, config.MARGIN_LEFT + Emu(600000), Emu(3300000),
-                     config.CONTENT_WIDTH - Emu(1200000), Emu(400000),
-                     font_size=config.FONT_SUBTITLE, alignment="center",
-                     color="666666")
+    _remove_text_artifacts(slide)
+    cw = _sw - int(config.MARGIN_LEFT) - int(config.MARGIN_RIGHT)
+    inset = min(Emu(600000), cw // 10)
+    _add_textbox(slide, title_text, int(config.MARGIN_LEFT) + inset, Emu(2300000),
+                 cw - 2 * inset, Emu(900000),
+                 font_size=Pt(36), bold=True, alignment="center")
+    _add_textbox(slide, subtitle_text, int(config.MARGIN_LEFT) + inset, Emu(3300000),
+                 cw - 2 * inset, Emu(400000),
+                 font_size=config.FONT_SUBTITLE, alignment="center",
+                 color="666666")
 
 
 # ── Title bar ───────────────────────────────────────────────────────
 
 def _add_title_bar(slide, title: str, subtitle: str | None = None, has_tpl: bool = False):
     """Add a title bar at the top of a content slide with accent underline."""
+    cw = _sw - int(config.MARGIN_LEFT) - int(config.MARGIN_RIGHT)
     # Title
     txBox = slide.shapes.add_textbox(
         config.MARGIN_LEFT, config.MARGIN_TOP,
-        config.CONTENT_WIDTH, Emu(530000)
+        cw, Emu(530000)
     )
     tf = txBox.text_frame
     tf.word_wrap = True
@@ -502,7 +601,7 @@ def _add_title_bar(slide, title: str, subtitle: str | None = None, has_tpl: bool
     if subtitle:
         txBox2 = slide.shapes.add_textbox(
             config.MARGIN_LEFT, Emu(config.MARGIN_TOP + 580000),
-            config.CONTENT_WIDTH, Emu(350000)
+            cw, Emu(350000)
         )
         tf2 = txBox2.text_frame
         tf2.word_wrap = True
@@ -535,23 +634,19 @@ def _add_slide_furniture(slide, spec: SlideSpec, has_tpl: bool, deck_title: str)
         return
     # ── Footer bar ──
     footer_h = Emu(300000)
-    footer_y = config.SLIDE_HEIGHT - footer_h
+    footer_y = _sh - footer_h
     footer = slide.shapes.add_shape(
-        MSO_SHAPE.RECTANGLE, 0, footer_y, config.SLIDE_WIDTH, footer_h
+        MSO_SHAPE.RECTANGLE, 0, footer_y, _sw, footer_h
     )
     footer.fill.solid()
-    if has_tpl:
-        footer.fill.fore_color.theme_color = MSO_THEME_COLOR.DARK_2
-        footer.fill.fore_color.brightness = 0.85
-    else:
-        footer.fill.fore_color.rgb = _hex_to_rgb("F2F2F2")
+    footer.fill.fore_color.rgb = _hex_to_rgb("F2F2F2")
     footer.line.fill.background()
 
     # Footer text — deck title
     if deck_title:
         ft = slide.shapes.add_textbox(
             config.MARGIN_LEFT, footer_y + Emu(60000),
-            Emu(8000000), Emu(200000)
+            Emu(min(8000000, _sw - 1500000)), Emu(200000)
         )
         tf = ft.text_frame
         tf.word_wrap = False
@@ -563,7 +658,7 @@ def _add_slide_furniture(slide, spec: SlideSpec, has_tpl: bool, deck_title: str)
 
     # Slide number
     sn = slide.shapes.add_textbox(
-        Emu(config.SLIDE_WIDTH - 1000000), footer_y + Emu(60000),
+        Emu(_sw - 1000000), footer_y + Emu(60000),
         Emu(700000), Emu(200000)
     )
     tf2 = sn.text_frame
@@ -577,13 +672,10 @@ def _add_slide_furniture(slide, spec: SlideSpec, has_tpl: bool, deck_title: str)
 
     # ── Left accent stripe with vertical gradient ──
     stripe = slide.shapes.add_shape(
-        MSO_SHAPE.RECTANGLE, 0, 0, Emu(60000), config.SLIDE_HEIGHT - footer_h
+        MSO_SHAPE.RECTANGLE, 0, 0, Emu(60000), _sh - footer_h
     )
-    if has_tpl:
-        style_accent_bar(stripe, theme_color=MSO_THEME_COLOR.ACCENT_1, angle=270.0)
-    else:
-        add_gradient(stripe, [(0.0, _hex_to_rgb("4472C4")), (1.0, _hex_to_rgb("2B579A"))], angle=270.0)
-        remove_outline(stripe)
+    add_gradient(stripe, [(0.0, _hex_to_rgb("4472C4")), (1.0, _hex_to_rgb("2B579A"))], angle=270.0)
+    remove_outline(stripe)
 
 
 # ── Element renderer dispatch ───────────────────────────────────────
@@ -758,9 +850,16 @@ def _render_content_bullets(slide, pos, items: list[str], font_size, has_tpl: bo
         stripe.line.fill.background()
 
     inner_left = pos.left + Emu(200000)
-    inner_top = pos.top + Emu(120000)
+    pad_v = Emu(120000)
     inner_width = pos.width - Emu(320000)
-    inner_height = pos.height - Emu(240000)
+    inner_height = pos.height - 2 * pad_v
+
+    # Estimate content height and vertically center when content is short
+    est_line_h = Emu(280000)  # ~0.31 inches per bullet line
+    est_content_h = min(len(items) * est_line_h, inner_height)
+    v_offset = max(Emu(0), (inner_height - est_content_h) // 3)  # bias toward upper-third
+    inner_top = pos.top + pad_v + v_offset
+    inner_height = inner_height - v_offset
 
     split_columns = len(items) >= 5 and pos.width >= Emu(7000000)
     if split_columns:
@@ -827,7 +926,10 @@ def _render_chart(slide, pos, content: ChartContent,
         plot = chart.plots[0]
         show_data_labels = (
             content.chart_type in ("pie", "doughnut")
-            or (len(content.series) == 1 and len(content.categories) <= 6)
+            or (content.chart_type in ("bar", "column")
+                and len(content.series) <= 2
+                and len(content.categories) <= 10)
+            or (len(content.series) == 1 and len(content.categories) <= 8)
         )
         plot.has_data_labels = show_data_labels
         if show_data_labels:
@@ -937,11 +1039,11 @@ def _render_table(slide, pos, content: TableContent,
                     else:
                         cell.fill.fore_color.rgb = _hex_to_rgb("EDF2F9")
                 cell.vertical_anchor = MSO_ANCHOR.MIDDLE
-                # Cell padding - generous for readability
+                # Cell padding - compact for data rows
                 cell.margin_left = Emu(100000)
                 cell.margin_right = Emu(100000)
-                cell.margin_top = Emu(55000)
-                cell.margin_bottom = Emu(55000)
+                cell.margin_top = Emu(36000)
+                cell.margin_bottom = Emu(36000)
                 # Predictable text layout
                 _set_autofit(cell.text_frame)
 
@@ -997,13 +1099,14 @@ def _render_infographic(slide, pos, content: InfographicContent,
 
 def _render_process_flow(slide, pos, items, has_tpl: bool = False):
     """Render a process flow with rounded rectangles, step number overlays, and arrow connectors."""
+    items = items[:config.MAX_PROCESS_ITEMS]  # cap to avoid congestion
     n = len(items)
     if n == 0:
         return
 
     # Brand-aligned: cycle through only 2-3 colors
     _FLOW_ACCENTS = [MSO_THEME_COLOR.ACCENT_1, MSO_THEME_COLOR.ACCENT_6, MSO_THEME_COLOR.ACCENT_2]
-    _FLOW_FALLBACK = ["4472C4", "70AD47", "ED7D31"]
+    _FLOW_FALLBACK = FLOW_ACCENT_HEX
 
     arrow_gap = Emu(260000)  # more space for arrow between boxes
     usable_w = pos.width - arrow_gap * max(n - 1, 0)
@@ -1059,20 +1162,26 @@ def _render_process_flow(slide, pos, items, has_tpl: bool = False):
         tf.margin_right = config.TF_MARGIN_RIGHT
         tf.margin_top = Emu(100000)
         tf.margin_bottom = Emu(80000)
-        _set_autofit(tf)
+        _set_autofit(tf, shrink_ok=True)
+
+        # Contrast-aware text color
+        _fb = _FLOW_FALLBACK[i % len(_FLOW_FALLBACK)]
+        _txt_hex = pick_text_color(_fb)
+        _txt_rgb = _hex_to_rgb(_txt_hex)
+        _sub_rgb = _hex_to_rgb(darken_hex(_txt_hex, 0.08))
 
         p = tf.paragraphs[0]
         p.text = item.title
         p.font.size = Pt(12)
         p.font.bold = True
-        p.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+        p.font.color.rgb = _txt_rgb
         p.alignment = PP_ALIGN.CENTER
 
         if item.description:
             p2 = tf.add_paragraph()
-            p2.text = item.description[:90]
+            p2.text = item.description[:config.MAX_INFOGRAPHIC_DESC]
             p2.font.size = Pt(10)
-            p2.font.color.rgb = RGBColor(0xEE, 0xEE, 0xEE)
+            p2.font.color.rgb = _sub_rgb
             p2.alignment = PP_ALIGN.CENTER
             p2.space_before = Pt(8)
 
@@ -1128,7 +1237,7 @@ def _render_timeline(slide, pos, items, has_tpl: bool = False):
         p.text = str(i + 1)
         p.font.size = Pt(10)
         p.font.bold = True
-        p.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+        p.font.color.rgb = _hex_to_rgb(pick_text_color("2B5797"))
         p.alignment = PP_ALIGN.CENTER
 
         # Connecting line segment from circle to label
@@ -1163,11 +1272,11 @@ def _render_timeline(slide, pos, items, has_tpl: bool = False):
 def _render_comparison(slide, pos, items, has_tpl: bool = False):
     """Render side-by-side comparison cards with brand-aligned colors."""
     _CMP_ACCENTS = [MSO_THEME_COLOR.ACCENT_1, MSO_THEME_COLOR.ACCENT_6, MSO_THEME_COLOR.DARK_2]
-    _CMP_FALLBACK = ["4472C4", "70AD47", "44546A"]
+    _CMP_FALLBACK = CMP_ACCENT_HEX
     n = len(items)
     if n == 0:
         return
-    gap = Emu(160000)  # more breathing room between cards
+    gap = config.SHAPE_GAP
     card_width = (pos.width - gap * max(n - 1, 0)) // max(n, 1)
     card_height = pos.height
 
@@ -1193,20 +1302,25 @@ def _render_comparison(slide, pos, items, has_tpl: bool = False):
         tf.margin_right = config.TF_MARGIN_RIGHT
         tf.margin_top = Emu(100000)
         tf.margin_bottom = Emu(80000)
-        _set_autofit(tf)
+        _set_autofit(tf, shrink_ok=True)
+
+        # Contrast-aware text color
+        _cfb = _CMP_FALLBACK[i % len(_CMP_FALLBACK)]
+        _ctxt = _hex_to_rgb(pick_text_color(_cfb))
+        _csub = _hex_to_rgb(darken_hex(pick_text_color(_cfb), 0.08))
 
         p = tf.paragraphs[0]
         p.text = item.title
         p.font.size = Pt(13)
         p.font.bold = True
-        p.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+        p.font.color.rgb = _ctxt
         p.alignment = PP_ALIGN.CENTER
 
         if item.description:
             p2 = tf.add_paragraph()
-            p2.text = item.description[:100]
+            p2.text = item.description[:config.MAX_CMP_DESC]
             p2.font.size = Pt(10)
-            p2.font.color.rgb = RGBColor(0xEE, 0xEE, 0xEE)
+            p2.font.color.rgb = _csub
             p2.alignment = PP_ALIGN.CENTER
             p2.space_before = Pt(10)
 
@@ -1215,27 +1329,31 @@ def _render_comparison(slide, pos, items, has_tpl: bool = False):
             p3.text = item.value
             p3.font.size = Pt(20)
             p3.font.bold = True
-            p3.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+            p3.font.color.rgb = _ctxt
             p3.alignment = PP_ALIGN.CENTER
             p3.space_before = Pt(14)
 
 
 def _render_kpi_cards(slide, pos, items, has_tpl: bool = False):
     """Render KPI metric cards with value, title, and vertical centering.
-    Uses 3-color brand rotation with shadows and gradients for visual depth."""
-    _KPI_ACCENTS = [MSO_THEME_COLOR.ACCENT_1, MSO_THEME_COLOR.ACCENT_6, MSO_THEME_COLOR.DARK_2]
-    _KPI_FALLBACK = ["4472C4", "70AD47", "44546A"]
+    Uses 3-color brand rotation with shadows and gradients for visual depth.
+    Includes top accent stripe and separator line for visual polish."""
+    _KPI_ACCENTS = [MSO_THEME_COLOR.ACCENT_1, MSO_THEME_COLOR.ACCENT_6, MSO_THEME_COLOR.ACCENT_2]
+    _KPI_FALLBACK = KPI_ACCENT_HEX
+    items = items[:config.MAX_KPI_ITEMS]  # cap to avoid congestion
     n = len(items)
     if n == 0:
         return
-    gap = Emu(160000)  # more breathing room
+    gap = config.SHAPE_GAP
     card_width = (pos.width - gap * max(n - 1, 0)) // max(n, 1)
-    card_height = min(pos.height, Emu(2000000))
+    card_height = min(pos.height, Emu(2200000))
     y = pos.top + (pos.height - card_height) // 2
+    stripe_h = Emu(60000)  # top accent stripe height
 
     for i, item in enumerate(items):
         x = pos.left + i * (card_width + gap)
 
+        # ── Card background with shadow + gradient ──
         card = slide.shapes.add_shape(
             MSO_SHAPE.ROUNDED_RECTANGLE, x, y, card_width, card_height
         )
@@ -1248,39 +1366,69 @@ def _render_kpi_cards(slide, pos, items, has_tpl: bool = False):
             style_card(card, gradient_stops=[(0.0, c1), (1.0, c2)],
                        shadow_preset="card", corner_radius=8000)
 
+        # ── Top accent stripe (lighter shade) ──
+        stripe = slide.shapes.add_shape(
+            MSO_SHAPE.RECTANGLE, x, y, card_width, stripe_h
+        )
+        stripe.fill.solid()
+        stripe.fill.fore_color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+        sp_el = stripe._element.spPr
+        if sp_el is not None:
+            # Set transparency to 70% for a subtle frosted effect
+            fill_el = sp_el.find(qn("a:solidFill"))
+            if fill_el is not None:
+                srgb = fill_el.find(qn("a:srgbClr"))
+                if srgb is not None:
+                    alpha_el = etree.SubElement(srgb, qn("a:alpha"))
+                    alpha_el.set("val", "30000")  # 30% opacity
+        stripe.line.fill.background()
+
         tf = card.text_frame
         tf.word_wrap = True
-        tf.margin_top = Emu(140000)
+        tf.margin_top = Emu(stripe_h + 80000)
         tf.margin_left = config.TF_MARGIN_LEFT
         tf.margin_right = config.TF_MARGIN_RIGHT
         tf.margin_bottom = Emu(80000)
-        _set_autofit(tf)
-        tf.paragraphs[0].alignment = PP_ALIGN.CENTER
-        tf.paragraphs[0].space_before = Pt(16)
+        _set_autofit(tf, shrink_ok=True)
 
-        # Big value
+        # Contrast-aware text color
+        _kfb = _KPI_FALLBACK[i % len(_KPI_FALLBACK)]
+        _ktxt = _hex_to_rgb(pick_text_color(_kfb, large_text=True))
+        _ksub = _hex_to_rgb(darken_hex(pick_text_color(_kfb), 0.08))
+
+        # Big value — prominent hero metric
         p = tf.paragraphs[0]
         p.text = item.value or ""
-        p.font.size = Pt(30)
+        p.font.size = Pt(34)
         p.font.bold = True
-        p.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+        p.font.color.rgb = _ktxt
         p.alignment = PP_ALIGN.CENTER
+        p.space_before = Pt(8)
 
-        # Label below
+        # ── Thin separator line (text-based, lightweight) ──
+        sep = tf.add_paragraph()
+        sep.text = "───"
+        sep.font.size = Pt(8)
+        sep.font.color.rgb = _ksub
+        sep.alignment = PP_ALIGN.CENTER
+        sep.space_before = Pt(6)
+
+        # Label below separator
         p2 = tf.add_paragraph()
         p2.text = item.title
         p2.font.size = Pt(12)
-        p2.font.color.rgb = RGBColor(0xEE, 0xEE, 0xEE)
+        p2.font.color.rgb = _ksub
         p2.alignment = PP_ALIGN.CENTER
-        p2.space_before = Pt(10)
+        p2.space_before = Pt(4)
 
         # Description if present
         if item.description:
             p3 = tf.add_paragraph()
-            p3.text = item.description[:70]
-            p3.font.size = Pt(8)
-            p3.font.color.rgb = RGBColor(0xEE, 0xEE, 0xEE)
+            p3.text = item.description[:config.MAX_INFOGRAPHIC_DESC]
+            p3.font.size = Pt(9)
+            p3.font.color.rgb = _ksub
             p3.alignment = PP_ALIGN.CENTER
+            p3.space_before = Pt(4)
 
 
 def _render_hierarchy(slide, pos, items, has_tpl: bool = False):
@@ -1321,17 +1469,23 @@ def _render_hierarchy(slide, pos, items, has_tpl: bool = False):
         tf.margin_right = config.TF_MARGIN_RIGHT
         tf.margin_top = Emu(60000)
         tf.margin_bottom = Emu(40000)
-        _set_autofit(tf)
+        _set_autofit(tf, shrink_ok=True)
+
+        # Contrast-aware text color
+        _hfb = _FALLBACK_ACCENT_HEX[i % len(_FALLBACK_ACCENT_HEX)]
+        _htxt = _hex_to_rgb(pick_text_color(_hfb))
+        _hsub = _hex_to_rgb(darken_hex(pick_text_color(_hfb), 0.08))
+
         p = tf.paragraphs[0]
         p.text = item.title
         p.font.size = Pt(12)
         p.font.bold = True
-        p.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+        p.font.color.rgb = _htxt
         p.alignment = PP_ALIGN.LEFT
 
         if item.description:
             p2 = tf.add_paragraph()
-            p2.text = item.description[:90]
+            p2.text = item.description[:config.MAX_INFOGRAPHIC_DESC]
             p2.font.size = Pt(10)
-            p2.font.color.rgb = RGBColor(0xEE, 0xEE, 0xEE)
+            p2.font.color.rgb = _hsub
             p2.space_before = Pt(4)

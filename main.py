@@ -21,8 +21,30 @@ from src import config
 console = Console()
 
 
-def _auto_slide_count(file_size_bytes: int) -> int:
-    """Pick a target slide count (10-15) based on markdown file size."""
+def _auto_slide_count(file_size_bytes: int, md_text: str | None = None) -> int:
+    """Pick a target slide count (10-15) using content profiling when available,
+    falling back to file-size heuristic otherwise."""
+    if md_text:
+        try:
+            from src.markdown_parser import parse_markdown
+            from src.content_profiler import profile_content
+            tree = parse_markdown(md_text)
+            prof = profile_content(tree)
+            # Base: 4 structural slides (cover + agenda + conclusion + thank_you)
+            base = 4
+            # Add 1 slide per section, capped at 9 content slides
+            section_slides = min(prof.total_sections, 9)
+            # Bonus slides for data-rich content
+            bonus = 0
+            if prof.total_tables >= 3:
+                bonus += 1
+            if prof.total_metrics >= 5:
+                bonus += 1
+            target = base + section_slides + bonus
+            return max(config.MIN_SLIDES, min(config.MAX_SLIDES, target))
+        except Exception:
+            pass  # fall back to size-based
+
     kb = file_size_bytes / 1024
     if kb < 30:
         return 10
@@ -147,7 +169,11 @@ def process_batch(
         console.print(f"\n[dim]── [{i}/{len(md_files)}] ──[/dim]")
         out_path = str(config.OUTPUT_DIR / f"{md_file.stem}.pptx")
         # Auto-calculate slide count per file if target_slides is 0 (auto mode)
-        slides = target_slides if target_slides > 0 else _auto_slide_count(md_file.stat().st_size)
+        if target_slides > 0:
+            slides = target_slides
+        else:
+            md_content = md_file.read_text(encoding="utf-8", errors="replace")
+            slides = _auto_slide_count(md_file.stat().st_size, md_content)
         ok = process_single(
             md_path=str(md_file),
             template_path=template_path,

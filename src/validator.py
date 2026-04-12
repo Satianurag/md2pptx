@@ -3,7 +3,7 @@ import logging
 from .schemas import (
     PresentationSpec, SlideSpec, SlideElement,
     TextContent, BulletContent, ChartContent, TableContent,
-    InfographicContent, Position,
+    InfographicContent, Position, SlideMasterInfo,
 )
 from . import config
 
@@ -15,8 +15,9 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-SLIDE_W = config.SLIDE_WIDTH
-SLIDE_H = config.SLIDE_HEIGHT
+# Default slide dims — overridden dynamically in validate_and_fix
+_SLIDE_W = config.SLIDE_WIDTH
+_SLIDE_H = config.SLIDE_HEIGHT
 
 
 class ValidationResult:
@@ -37,12 +38,24 @@ class ValidationResult:
         )
 
 
-def validate_and_fix(spec: PresentationSpec, content_profile=None) -> ValidationResult:
+def validate_and_fix(
+    spec: PresentationSpec,
+    content_profile=None,
+    slide_width: int | None = None,
+    slide_height: int | None = None,
+    master_info: SlideMasterInfo | None = None,
+) -> ValidationResult:
     """Validate a PresentationSpec and apply rule-based auto-fixes. Mutates spec in place."""
+    global _SLIDE_W, _SLIDE_H
+    if slide_width:
+        _SLIDE_W = slide_width
+    if slide_height:
+        _SLIDE_H = slide_height
+
     result = ValidationResult()
 
     _check_slide_count(spec, result)
-    _check_slide_flow(spec, result)
+    _check_slide_flow(spec, result, master_info)
     _check_visual_ratio(spec, result, content_profile)
 
     for slide in spec.slides:
@@ -60,10 +73,23 @@ def validate_and_fix(spec: PresentationSpec, content_profile=None) -> Validation
 
 def _check_slide_count(spec: PresentationSpec, result: ValidationResult) -> None:
     n = len(spec.slides)
-    if n < config.MIN_SLIDES:
+    if n > config.MAX_SLIDES:
+        # Enforce: trim excess content slides from the middle, keep bookends
+        cover = [s for s in spec.slides if s.slide_type == "cover"][:1]
+        thank = [s for s in spec.slides if s.slide_type == "thank_you"][-1:]
+        middle = [s for s in spec.slides if s.slide_type not in ("cover", "thank_you")]
+        allowed = config.MAX_SLIDES - len(cover) - len(thank)
+        if len(middle) > allowed:
+            middle = middle[:allowed]
+            result.fixes_applied.append(
+                f"Trimmed to {config.MAX_SLIDES} slides (was {n})"
+            )
+        spec.slides = cover + middle + thank
+        # Renumber
+        for i, s in enumerate(spec.slides):
+            s.slide_number = i + 1
+    elif n < config.MIN_SLIDES:
         result.warnings.append(f"Only {n} slides, minimum is {config.MIN_SLIDES}")
-    elif n > config.MAX_SLIDES:
-        result.warnings.append(f"{n} slides exceeds maximum {config.MAX_SLIDES}")
 
 
 def _check_visual_ratio(spec: PresentationSpec, result: ValidationResult, profile=None) -> None:
@@ -92,18 +118,91 @@ def _check_visual_ratio(spec: PresentationSpec, result: ValidationResult, profil
         )
 
 
-def _check_slide_flow(spec: PresentationSpec, result: ValidationResult) -> None:
+def _check_slide_flow(spec: PresentationSpec, result: ValidationResult, master_info: SlideMasterInfo | None = None) -> None:
     if not spec.slides:
         result.errors.append("No slides in presentation")
         return
 
-    # First slide should be cover
-    if spec.slides[0].slide_type != "cover":
-        result.warnings.append(f"First slide is '{spec.slides[0].slide_type}', expected 'cover'")
+    _enforce_slide_ordering(spec, result, master_info)
 
-    # Last slide should be thank_you
-    if spec.slides[-1].slide_type != "thank_you":
-        result.warnings.append(f"Last slide is '{spec.slides[-1].slide_type}', expected 'thank_you'")
+
+def _enforce_slide_ordering(spec: PresentationSpec, result: ValidationResult, master_info: SlideMasterInfo | None = None) -> None:
+    """Hard enforcement of structural slide ordering (Brief §3.10).
+
+    Rules applied (mutates ``spec.slides`` in place):
+    1. Cover must be slide 1 — move if misplaced, create if missing.
+    2. Thank you must be the last slide — move if misplaced, create if missing.
+       When a template is used (``master_info`` is not None), thank_you is
+       **never** auto-created because the renderer adds the template's closing
+       slide as a fixed bookend regardless of its type.
+    3. Remove duplicate structural slides (max 1 cover, 1 thank_you, 1 agenda).
+    4. Section dividers cannot be adjacent.
+    5. Renumber all slides after reordering.
+    """
+    slides = spec.slides
+
+    # --- Deduplicate structural slides ---
+    seen_types: dict[str, int] = {}
+    deduped: list[SlideSpec] = []
+    for s in slides:
+        if s.slide_type in ("cover", "thank_you", "agenda"):
+            count = seen_types.get(s.slide_type, 0)
+            if count > 0:
+                result.fixes_applied.append(
+                    f"Removed duplicate '{s.slide_type}' slide (was slide {s.slide_number})"
+                )
+                continue
+            seen_types[s.slide_type] = count + 1
+        deduped.append(s)
+    slides = deduped
+
+    # --- Remove adjacent section dividers ---
+    cleaned: list[SlideSpec] = []
+    for s in slides:
+        if s.slide_type == "section_divider" and cleaned and cleaned[-1].slide_type == "section_divider":
+            result.fixes_applied.append(
+                f"Removed adjacent section_divider (slide {s.slide_number})"
+            )
+            continue
+        cleaned.append(s)
+    slides = cleaned
+
+    # --- Ensure cover is first ---
+    cover_slides = [s for s in slides if s.slide_type == "cover"]
+    non_cover = [s for s in slides if s.slide_type != "cover"]
+    if cover_slides:
+        if slides[0].slide_type != "cover":
+            result.fixes_applied.append("Moved cover slide to position 1")
+        slides = cover_slides[:1] + non_cover
+    else:
+        result.warnings.append("No cover slide found in presentation")
+
+    # --- Ensure thank_you is last ---
+    ty_slides = [s for s in slides if s.slide_type == "thank_you"]
+    non_ty = [s for s in slides if s.slide_type != "thank_you"]
+    if ty_slides:
+        if slides[-1].slide_type != "thank_you":
+            result.fixes_applied.append("Moved thank_you slide to last position")
+        slides = non_ty + ty_slides[-1:]
+    else:
+        # Only auto-create thank_you when there is NO template at all.
+        # When a template is used, the renderer adds the template's closing
+        # slide (which may or may not be a "thank you") as a fixed bookend.
+        if not master_info:
+            ty = SlideSpec(
+                slide_number=len(slides) + 1,
+                slide_type="thank_you",
+                layout_name=config.LAYOUT_THANK_YOU,
+                title="Thank You",
+            )
+            slides.append(ty)
+            result.fixes_applied.append("Appended missing thank_you slide")
+
+    # --- Renumber ---
+    for i, s in enumerate(slides):
+        s.slide_number = i + 1
+
+    spec.slides = slides
 
 
 # ── Per-slide checks ──
@@ -271,14 +370,14 @@ def _check_element_bounds(slide_num: int, element: SlideElement, result: Validat
 
     # Ensure width doesn't overflow right edge
     right_edge = pos.left + pos.width
-    if right_edge > SLIDE_W:
-        pos.width = SLIDE_W - pos.left - int(config.MARGIN_RIGHT)
+    if right_edge > _SLIDE_W:
+        pos.width = _SLIDE_W - pos.left - int(config.MARGIN_RIGHT)
         fixed = True
 
     # Ensure height doesn't overflow bottom edge
     bottom_edge = pos.top + pos.height
-    if bottom_edge > SLIDE_H:
-        pos.height = SLIDE_H - pos.top - int(config.MARGIN_BOTTOM)
+    if bottom_edge > _SLIDE_H:
+        pos.height = _SLIDE_H - pos.top - int(config.MARGIN_BOTTOM)
         fixed = True
 
     # Ensure minimum dimensions

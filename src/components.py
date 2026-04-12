@@ -21,6 +21,13 @@ from pptx.enum.text import PP_ALIGN, MSO_ANCHOR, MSO_AUTO_SIZE
 from pptx.util import Emu, Pt
 
 from . import config
+from .color_utils import (
+    FALLBACK_ACCENT_HEX,
+    KPI_ACCENT_HEX,
+    pick_text_color,
+    _hex_to_rgb as _cu_hex_to_rgb,
+    darken_hex,
+)
 from .drawingml_effects import (
     add_shadow,
     add_gradient,
@@ -43,9 +50,7 @@ _ACCENT_THEME = [
     MSO_THEME_COLOR.ACCENT_5, MSO_THEME_COLOR.ACCENT_6,
 ]
 
-_FALLBACK_HEX = [
-    "4472C4", "ED7D31", "A5A5A5", "FFC000", "5B9BD5", "70AD47",
-]
+_FALLBACK_HEX = FALLBACK_ACCENT_HEX
 
 
 def _hex_to_rgb(h: str) -> RGBColor:
@@ -53,9 +58,16 @@ def _hex_to_rgb(h: str) -> RGBColor:
     return RGBColor(int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
 
 
-def _set_autofit(tf) -> None:
-    tf.auto_size = MSO_AUTO_SIZE.NONE
+def _set_autofit(tf, *, shrink_ok: bool = False) -> None:
+    """Set text frame auto-size.  Use *shrink_ok* for bounded cards."""
+    tf.auto_size = MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE if shrink_ok else MSO_AUTO_SIZE.NONE
     tf.word_wrap = True
+
+
+def _fg_color_for_accent(accent_idx: int, has_tpl: bool) -> RGBColor:
+    """Return the best foreground text color for the given accent background."""
+    bg_hex = _FALLBACK_HEX[accent_idx % len(_FALLBACK_HEX)]
+    return _hex_to_rgb(pick_text_color(bg_hex))
 
 
 # ---------------------------------------------------------------------------
@@ -105,30 +117,35 @@ def render_kpi_card(
     tf.margin_left = config.TF_MARGIN_LEFT
     tf.margin_right = config.TF_MARGIN_RIGHT
     tf.margin_bottom = Emu(80000)
-    _set_autofit(tf)
+    _set_autofit(tf, shrink_ok=True)
+
+    # Determine text color based on background contrast
+    txt_rgb = _fg_color_for_accent(accent_idx, has_tpl)
+    sub_hex = darken_hex(pick_text_color(_FALLBACK_HEX[accent_idx % len(_FALLBACK_HEX)]), 0.08)
+    sub_rgb = _hex_to_rgb(sub_hex)
 
     # Hero value
     p = tf.paragraphs[0]
     p.text = value
     p.font.size = Pt(30)
     p.font.bold = True
-    p.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+    p.font.color.rgb = txt_rgb
     p.alignment = PP_ALIGN.CENTER
 
     # Label
     p2 = tf.add_paragraph()
     p2.text = label
     p2.font.size = Pt(12)
-    p2.font.color.rgb = RGBColor(0xEE, 0xEE, 0xEE)
+    p2.font.color.rgb = sub_rgb
     p2.alignment = PP_ALIGN.CENTER
     p2.space_before = Pt(10)
 
     # Description
     if description:
         p3 = tf.add_paragraph()
-        p3.text = description[:70]
+        p3.text = description[:config.MAX_INFOGRAPHIC_DESC]
         p3.font.size = Pt(9)
-        p3.font.color.rgb = RGBColor(0xDD, 0xDD, 0xDD)
+        p3.font.color.rgb = sub_rgb
         p3.alignment = PP_ALIGN.CENTER
 
 
@@ -174,9 +191,9 @@ def render_content_card(
     htf.margin_top = Emu(40000)
     hp = htf.paragraphs[0]
     hp.text = title
-    hp.font.size = Pt(12)
+    hp.font.size = Pt(14)
     hp.font.bold = True
-    hp.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+    hp.font.color.rgb = _fg_color_for_accent(accent_idx, has_tpl)
     hp.alignment = PP_ALIGN.LEFT
 
     # Body items
@@ -194,7 +211,7 @@ def render_content_card(
         for idx, item in enumerate(items):
             p = tf.paragraphs[0] if idx == 0 else tf.add_paragraph()
             p.text = f"• {item}"
-            p.font.size = Pt(10)
+            p.font.size = Pt(11)
             p.alignment = PP_ALIGN.LEFT
             if idx > 0:
                 p.space_before = Pt(6)
@@ -237,7 +254,7 @@ def render_stat_callout(
     p.text = number
     p.font.size = Pt(16)
     p.font.bold = True
-    p.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+    p.font.color.rgb = _fg_color_for_accent(accent_idx, has_tpl)
     p.alignment = PP_ALIGN.CENTER
 
     # Label below
@@ -303,7 +320,7 @@ def render_numbered_circle(
     p.text = f"{number:02d}"
     p.font.size = Pt(10)
     p.font.bold = True
-    p.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+    p.font.color.rgb = _fg_color_for_accent(accent_idx, has_tpl)
     p.alignment = PP_ALIGN.CENTER
 
 
@@ -371,5 +388,5 @@ def render_section_badge(
     p.text = section_text
     p.font.size = Pt(10)
     p.font.bold = True
-    p.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+    p.font.color.rgb = _fg_color_for_accent(accent_idx, has_tpl)
     p.alignment = PP_ALIGN.CENTER
