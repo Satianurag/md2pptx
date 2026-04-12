@@ -54,7 +54,7 @@ def _hex_to_rgb(h: str) -> RGBColor:
 
 
 def _set_autofit(tf) -> None:
-    tf.auto_size = MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE
+    tf.auto_size = MSO_AUTO_SIZE.NONE
     tf.word_wrap = True
 
 
@@ -101,15 +101,16 @@ def render_kpi_card(
 
     tf = card.text_frame
     tf.word_wrap = True
-    tf.margin_top = Emu(100000)
-    tf.margin_left = Emu(60000)
-    tf.margin_right = Emu(60000)
+    tf.margin_top = Emu(140000)
+    tf.margin_left = config.TF_MARGIN_LEFT
+    tf.margin_right = config.TF_MARGIN_RIGHT
+    tf.margin_bottom = Emu(80000)
     _set_autofit(tf)
 
     # Hero value
     p = tf.paragraphs[0]
     p.text = value
-    p.font.size = Pt(28)
+    p.font.size = Pt(30)
     p.font.bold = True
     p.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
     p.alignment = PP_ALIGN.CENTER
@@ -117,16 +118,16 @@ def render_kpi_card(
     # Label
     p2 = tf.add_paragraph()
     p2.text = label
-    p2.font.size = Pt(11)
+    p2.font.size = Pt(12)
     p2.font.color.rgb = RGBColor(0xEE, 0xEE, 0xEE)
     p2.alignment = PP_ALIGN.CENTER
-    p2.space_before = Pt(6)
+    p2.space_before = Pt(10)
 
     # Description
     if description:
         p3 = tf.add_paragraph()
-        p3.text = description[:80]
-        p3.font.size = Pt(8)
+        p3.text = description[:70]
+        p3.font.size = Pt(9)
         p3.font.color.rgb = RGBColor(0xDD, 0xDD, 0xDD)
         p3.alignment = PP_ALIGN.CENTER
 
@@ -169,31 +170,34 @@ def render_content_card(
     # Header title
     htf = hdr.text_frame
     htf.word_wrap = True
-    htf.margin_left = Emu(80000)
+    htf.margin_left = config.TF_MARGIN_LEFT
+    htf.margin_top = Emu(40000)
     hp = htf.paragraphs[0]
     hp.text = title
-    hp.font.size = Pt(11)
+    hp.font.size = Pt(12)
     hp.font.bold = True
     hp.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
     hp.alignment = PP_ALIGN.LEFT
 
     # Body items
     if items:
-        body_top = y + hdr_h + Emu(60000)
-        body_h = h - hdr_h - Emu(120000)
+        body_top = y + hdr_h + Emu(80000)
+        body_h = h - hdr_h - Emu(160000)
         tx = slide.shapes.add_textbox(
-            x + Emu(100000), body_top,
-            w - Emu(200000), body_h
+            x + Emu(120000), body_top,
+            w - Emu(240000), body_h
         )
         tf = tx.text_frame
         tf.word_wrap = True
+        tf.margin_left = Emu(50000)
+        tf.margin_right = Emu(50000)
         for idx, item in enumerate(items):
             p = tf.paragraphs[0] if idx == 0 else tf.add_paragraph()
             p.text = f"• {item}"
             p.font.size = Pt(10)
             p.alignment = PP_ALIGN.LEFT
             if idx > 0:
-                p.space_before = Pt(4)
+                p.space_before = Pt(6)
         _set_autofit(tf)
 
 

@@ -114,8 +114,12 @@ def _remove_unused_placeholders(slide) -> None:
 
 
 def _set_autofit(text_frame) -> None:
-    """Set text frame to auto-shrink text to fit shape (PowerPoint renders on open)."""
-    text_frame.auto_size = MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE
+    """Disable auto-size and enable word wrap for predictable text layout.
+
+    Using NONE + word_wrap avoids PowerPoint shrinking text to unreadable
+    sizes.  Text that overflows is clipped rather than distorted.
+    """
+    text_frame.auto_size = MSO_AUTO_SIZE.NONE
     text_frame.word_wrap = True
 
 
@@ -125,6 +129,10 @@ def _set_text_frame_text(text_frame, text: str, font_size=None, bold: bool | Non
     """Replace a text frame with a single formatted paragraph."""
     text_frame.clear()
     text_frame.word_wrap = True
+    text_frame.margin_left = config.TF_MARGIN_LEFT
+    text_frame.margin_right = config.TF_MARGIN_RIGHT
+    text_frame.margin_top = config.TF_MARGIN_TOP
+    text_frame.margin_bottom = config.TF_MARGIN_BOTTOM
     p = text_frame.paragraphs[0]
     p.text = text
     if font_size is not None:
@@ -144,13 +152,18 @@ def _populate_text_list(text_frame, items: list[str], font_size, prefix: str = "
     """Populate a text frame with a concise multi-paragraph list."""
     text_frame.clear()
     text_frame.word_wrap = True
+    text_frame.margin_left = config.TF_MARGIN_LEFT
+    text_frame.margin_right = config.TF_MARGIN_RIGHT
+    text_frame.margin_top = config.TF_MARGIN_TOP
+    text_frame.margin_bottom = config.TF_MARGIN_BOTTOM
     for idx, item in enumerate(items):
         p = text_frame.paragraphs[0] if idx == 0 else text_frame.add_paragraph()
         p.text = f"{prefix}{item}" if prefix else item
         p.font.size = font_size
         p.alignment = PP_ALIGN.LEFT
+        p.line_spacing = Pt(int(font_size.pt * 1.4)) if hasattr(font_size, 'pt') else None
         if idx > 0:
-            p.space_before = Pt(8)
+            p.space_before = config.BULLET_SPACE_BEFORE
     _set_autofit(text_frame)
 
 
@@ -350,8 +363,8 @@ def _render_cover(slide, spec: SlideSpec, master_info: SlideMasterInfo | None = 
         if len(ph_list) >= 2:
             _set_autofit(ph_list[1].text_frame)
     else:
-        _add_textbox(slide, spec.title, config.MARGIN_LEFT, Emu(2500000),
-                     config.CONTENT_WIDTH, Emu(800000),
+        _add_textbox(slide, spec.title, config.MARGIN_LEFT, Emu(2400000),
+                     config.CONTENT_WIDTH, Emu(900000),
                      font_size=config.FONT_TITLE, bold=True, alignment="center")
         if spec.subtitle:
             _add_textbox(slide, spec.subtitle, config.MARGIN_LEFT, Emu(3500000),
@@ -360,8 +373,8 @@ def _render_cover(slide, spec: SlideSpec, master_info: SlideMasterInfo | None = 
 
     # Bottom accent bar on cover with gradient
     accent = slide.shapes.add_shape(
-        MSO_SHAPE.RECTANGLE, 0, config.SLIDE_HEIGHT - Emu(120000),
-        config.SLIDE_WIDTH, Emu(120000)
+        MSO_SHAPE.RECTANGLE, 0, config.SLIDE_HEIGHT - Emu(100000),
+        config.SLIDE_WIDTH, Emu(100000)
     )
     if has_tpl:
         style_accent_bar(accent, theme_color=MSO_THEME_COLOR.ACCENT_1, angle=0.0)
@@ -400,22 +413,22 @@ def _render_divider(slide, spec: SlideSpec, has_tpl: bool = False):
             except Exception:
                 ph.text = ""
     else:
-        _add_textbox(slide, spec.title, config.MARGIN_LEFT, Emu(2800000),
-                     config.CONTENT_WIDTH, Emu(800000),
+        _add_textbox(slide, spec.title, config.MARGIN_LEFT, Emu(2700000),
+                     config.CONTENT_WIDTH, Emu(900000),
                      font_size=config.FONT_TITLE, bold=True, alignment="center")
 
     # Subtitle textbox (if no placeholders handled it)
     if spec.subtitle and not phs:
-        _add_textbox(slide, spec.subtitle, config.MARGIN_LEFT, Emu(3600000),
+        _add_textbox(slide, spec.subtitle, config.MARGIN_LEFT, Emu(3700000),
                      config.CONTENT_WIDTH, Emu(500000),
                      font_size=config.FONT_SUBTITLE, alignment="center", color="666666")
 
     # Accent bar under title with gradient
-    bar_y = Emu(4200000) if spec.subtitle else Emu(3700000)
+    bar_y = Emu(4300000) if spec.subtitle else Emu(3800000)
     bar = slide.shapes.add_shape(
         MSO_SHAPE.RECTANGLE,
         config.MARGIN_LEFT + Emu(3000000), bar_y,
-        Emu(5000000), Emu(40000)
+        Emu(5000000), Emu(36000)
     )
     if has_tpl:
         style_accent_bar(bar, theme_color=MSO_THEME_COLOR.ACCENT_1, angle=0.0)
@@ -457,10 +470,10 @@ def _render_thank_you(slide, spec: SlideSpec, master_info: SlideMasterInfo | Non
     else:
         # No placeholders at all — use manual textboxes
         _remove_text_artifacts(slide)
-        _add_textbox(slide, title_text, config.MARGIN_LEFT + Emu(600000), Emu(2350000),
-                     config.CONTENT_WIDTH - Emu(1200000), Emu(800000),
+        _add_textbox(slide, title_text, config.MARGIN_LEFT + Emu(600000), Emu(2300000),
+                     config.CONTENT_WIDTH - Emu(1200000), Emu(900000),
                      font_size=Pt(36), bold=True, alignment="center")
-        _add_textbox(slide, subtitle_text, config.MARGIN_LEFT + Emu(600000), Emu(3200000),
+        _add_textbox(slide, subtitle_text, config.MARGIN_LEFT + Emu(600000), Emu(3300000),
                      config.CONTENT_WIDTH - Emu(1200000), Emu(400000),
                      font_size=config.FONT_SUBTITLE, alignment="center",
                      color="666666")
@@ -477,6 +490,8 @@ def _add_title_bar(slide, title: str, subtitle: str | None = None, has_tpl: bool
     )
     tf = txBox.text_frame
     tf.word_wrap = True
+    tf.margin_left = Emu(0)
+    tf.margin_top = Emu(0)
     p = tf.paragraphs[0]
     p.text = title
     p.font.size = config.FONT_TITLE
@@ -486,11 +501,13 @@ def _add_title_bar(slide, title: str, subtitle: str | None = None, has_tpl: bool
     # Subtitle
     if subtitle:
         txBox2 = slide.shapes.add_textbox(
-            config.MARGIN_LEFT, Emu(config.MARGIN_TOP + 550000),
+            config.MARGIN_LEFT, Emu(config.MARGIN_TOP + 580000),
             config.CONTENT_WIDTH, Emu(350000)
         )
         tf2 = txBox2.text_frame
         tf2.word_wrap = True
+        tf2.margin_left = Emu(0)
+        tf2.margin_top = Emu(0)
         p2 = tf2.paragraphs[0]
         p2.text = subtitle
         p2.font.size = config.FONT_SUBTITLE
@@ -498,10 +515,10 @@ def _add_title_bar(slide, title: str, subtitle: str | None = None, has_tpl: bool
         p2.alignment = PP_ALIGN.LEFT
 
     # Accent line under title with gradient
-    accent_y = Emu(config.MARGIN_TOP + (900000 if subtitle else 560000))
+    accent_y = Emu(config.MARGIN_TOP + (950000 if subtitle else 600000))
     accent = slide.shapes.add_shape(
         MSO_SHAPE.RECTANGLE, config.MARGIN_LEFT, accent_y,
-        Emu(2000000), Emu(36000)
+        Emu(2400000), Emu(36000)
     )
     if has_tpl:
         style_accent_bar(accent, theme_color=MSO_THEME_COLOR.ACCENT_1, angle=0.0)
@@ -602,6 +619,10 @@ def _add_textbox(slide, text, left, top, width, height,
     txBox = slide.shapes.add_textbox(left, top, width, height)
     tf = txBox.text_frame
     tf.word_wrap = True
+    tf.margin_left = Emu(50000)
+    tf.margin_right = Emu(50000)
+    tf.margin_top = Emu(30000)
+    tf.margin_bottom = Emu(30000)
     p = tf.paragraphs[0]
     p.text = text
     if font_size:
@@ -655,10 +676,10 @@ def _render_bullets(slide, pos, content: BulletContent, has_tpl: bool = False,
 def _render_agenda_bullets(slide, pos, items: list[str], font_size, has_tpl: bool) -> None:
     cols = 2 if len(items) > 4 else 1
     rows = (len(items) + cols - 1) // cols
-    gap_h = Emu(180000)
-    gap_v = Emu(140000)
-    card_w = (pos.width - gap_h * (cols - 1)) // cols
-    card_h = min((pos.height - gap_v * (rows - 1)) // max(rows, 1), Emu(720000))
+    gap_h = Emu(200000)
+    gap_v = Emu(160000)
+    card_w = (pos.width - gap_h * max(cols - 1, 0)) // max(cols, 1)
+    card_h = min((pos.height - gap_v * max(rows - 1, 0)) // max(rows, 1), Emu(800000))
 
     for idx, item in enumerate(items):
         col = idx % cols
@@ -671,7 +692,7 @@ def _render_agenda_bullets(slide, pos, items: list[str], font_size, has_tpl: boo
         add_shadow(card, preset="subtle")
         set_corner_radius(card, 8000)
 
-        badge = slide.shapes.add_shape(MSO_SHAPE.OVAL, x + Emu(90000), y + Emu(110000), Emu(220000), Emu(220000))
+        badge = slide.shapes.add_shape(MSO_SHAPE.OVAL, x + Emu(100000), y + Emu(120000), Emu(240000), Emu(240000))
         style_numbered_circle(badge, MSO_THEME_COLOR.ACCENT_1 if has_tpl else MSO_THEME_COLOR.ACCENT_1)
         if not has_tpl:
             badge.fill.solid()
@@ -681,23 +702,23 @@ def _render_agenda_bullets(slide, pos, items: list[str], font_size, has_tpl: boo
         _set_text_frame_text(
             badge.text_frame,
             str(idx + 1),
-            font_size=Pt(10),
+            font_size=Pt(11),
             bold=True,
             alignment=PP_ALIGN.CENTER,
             color_rgb=RGBColor(0xFF, 0xFF, 0xFF),
         )
 
-        tx = slide.shapes.add_textbox(x + Emu(380000), y + Emu(90000), card_w - Emu(500000), card_h - Emu(180000))
+        tx = slide.shapes.add_textbox(x + Emu(420000), y + Emu(100000), card_w - Emu(540000), card_h - Emu(200000))
         _populate_text_list(tx.text_frame, [item], font_size)
 
 
 def _render_summary_bullets(slide, pos, items: list[str], font_size, has_tpl: bool) -> None:
     cols = 2 if len(items) >= 4 else 1
     rows = (len(items) + cols - 1) // cols
-    gap_h = Emu(180000)
-    gap_v = Emu(160000)
-    card_w = (pos.width - gap_h * (cols - 1)) // cols
-    card_h = min((pos.height - gap_v * (rows - 1)) // max(rows, 1), Emu(1000000))
+    gap_h = Emu(200000)
+    gap_v = Emu(180000)
+    card_w = (pos.width - gap_h * max(cols - 1, 0)) // max(cols, 1)
+    card_h = min((pos.height - gap_v * max(rows - 1, 0)) // max(rows, 1), Emu(1100000))
 
     for idx, item in enumerate(items):
         col = idx % cols
@@ -718,7 +739,7 @@ def _render_summary_bullets(slide, pos, items: list[str], font_size, has_tpl: bo
             accent.fill.fore_color.rgb = _hex_to_rgb("4472C4")
             remove_outline(accent)
 
-        tx = slide.shapes.add_textbox(x + Emu(120000), y + Emu(120000), card_w - Emu(240000), card_h - Emu(180000))
+        tx = slide.shapes.add_textbox(x + Emu(140000), y + Emu(130000), card_w - Emu(280000), card_h - Emu(210000))
         _populate_text_list(tx.text_frame, [item], font_size)
 
 
@@ -736,14 +757,14 @@ def _render_content_bullets(slide, pos, items: list[str], font_size, has_tpl: bo
         stripe.fill.fore_color.rgb = _hex_to_rgb("4472C4")
         stripe.line.fill.background()
 
-    inner_left = pos.left + Emu(180000)
-    inner_top = pos.top + Emu(100000)
-    inner_width = pos.width - Emu(260000)
-    inner_height = pos.height - Emu(180000)
+    inner_left = pos.left + Emu(200000)
+    inner_top = pos.top + Emu(120000)
+    inner_width = pos.width - Emu(320000)
+    inner_height = pos.height - Emu(240000)
 
     split_columns = len(items) >= 5 and pos.width >= Emu(7000000)
     if split_columns:
-        gap = Emu(180000)
+        gap = Emu(200000)
         col_width = (inner_width - gap) // 2
         midpoint = (len(items) + 1) // 2
         left_box = slide.shapes.add_textbox(inner_left, inner_top, col_width, inner_height)
@@ -884,7 +905,7 @@ def _render_table(slide, pos, content: TableContent,
         cell.text = header
         para = cell.text_frame.paragraphs[0]
         para.font.bold = True
-        para.font.size = Pt(10)
+        para.font.size = Pt(11)
         para.alignment = PP_ALIGN.LEFT if col_idx == 0 else PP_ALIGN.CENTER
         cell.fill.solid()
         if has_tpl:
@@ -892,11 +913,11 @@ def _render_table(slide, pos, content: TableContent,
         else:
             cell.fill.fore_color.rgb = _hex_to_rgb(header_hex)
         para.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
-        # Cell padding
-        cell.margin_left = Emu(70000)
-        cell.margin_right = Emu(70000)
-        cell.margin_top = Emu(40000)
-        cell.margin_bottom = Emu(40000)
+        # Cell padding - generous for readability
+        cell.margin_left = Emu(100000)
+        cell.margin_right = Emu(100000)
+        cell.margin_top = Emu(55000)
+        cell.margin_bottom = Emu(55000)
 
     # Data rows
     for row_idx, row_data in enumerate(content.rows):
@@ -916,12 +937,12 @@ def _render_table(slide, pos, content: TableContent,
                     else:
                         cell.fill.fore_color.rgb = _hex_to_rgb("EDF2F9")
                 cell.vertical_anchor = MSO_ANCHOR.MIDDLE
-                # Cell padding
-                cell.margin_left = Emu(70000)
-                cell.margin_right = Emu(70000)
-                cell.margin_top = Emu(40000)
-                cell.margin_bottom = Emu(40000)
-                # Auto-fit cell text
+                # Cell padding - generous for readability
+                cell.margin_left = Emu(100000)
+                cell.margin_right = Emu(100000)
+                cell.margin_top = Emu(55000)
+                cell.margin_bottom = Emu(55000)
+                # Predictable text layout
                 _set_autofit(cell.text_frame)
 
 
@@ -984,17 +1005,17 @@ def _render_process_flow(slide, pos, items, has_tpl: bool = False):
     _FLOW_ACCENTS = [MSO_THEME_COLOR.ACCENT_1, MSO_THEME_COLOR.ACCENT_6, MSO_THEME_COLOR.ACCENT_2]
     _FLOW_FALLBACK = ["4472C4", "70AD47", "ED7D31"]
 
-    arrow_gap = Emu(200000)  # space for arrow text between boxes
+    arrow_gap = Emu(260000)  # more space for arrow between boxes
     usable_w = pos.width - arrow_gap * max(n - 1, 0)
-    item_width = min(usable_w // n, Emu(2800000))  # cap width at ~3 inches
+    item_width = min(usable_w // max(n, 1), Emu(3200000))  # wider cap for readability
 
     # Center the flow horizontally
     total_w = item_width * n + arrow_gap * max(n - 1, 0)
     x_offset = pos.left + (pos.width - total_w) // 2
 
-    item_height = Emu(min(pos.height, 1200000))
+    item_height = Emu(min(pos.height, 1400000))  # taller for more text room
     y_center = pos.top + (pos.height - item_height) // 2
-    step_circle_size = Emu(240000)
+    step_circle_size = Emu(260000)
 
     for i, item in enumerate(items):
         x = x_offset + i * (item_width + arrow_gap)
@@ -1023,7 +1044,7 @@ def _render_process_flow(slide, pos, items, has_tpl: bool = False):
         ctf.word_wrap = False
         cp = ctf.paragraphs[0]
         cp.text = str(i + 1)
-        cp.font.size = Pt(11)
+        cp.font.size = Pt(12)
         cp.font.bold = True
         if has_tpl:
             cp.font.color.theme_color = _FLOW_ACCENTS[i % len(_FLOW_ACCENTS)]
@@ -1034,9 +1055,10 @@ def _render_process_flow(slide, pos, items, has_tpl: bool = False):
         # ── Title + description inside the rectangle ──
         tf = shape.text_frame
         tf.word_wrap = True
-        tf.margin_left = Emu(60000)
-        tf.margin_right = Emu(60000)
-        tf.margin_top = Emu(80000)
+        tf.margin_left = config.TF_MARGIN_LEFT
+        tf.margin_right = config.TF_MARGIN_RIGHT
+        tf.margin_top = Emu(100000)
+        tf.margin_bottom = Emu(80000)
         _set_autofit(tf)
 
         p = tf.paragraphs[0]
@@ -1048,18 +1070,18 @@ def _render_process_flow(slide, pos, items, has_tpl: bool = False):
 
         if item.description:
             p2 = tf.add_paragraph()
-            p2.text = item.description[:100]
+            p2.text = item.description[:90]
             p2.font.size = Pt(10)
-            p2.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+            p2.font.color.rgb = RGBColor(0xEE, 0xEE, 0xEE)
             p2.alignment = PP_ALIGN.CENTER
-            p2.space_before = Pt(6)
+            p2.space_before = Pt(8)
 
         # ── Arrow connector (clean text '→' instead of shape) ──
         if i < n - 1:
             ax = x + item_width
-            ay = y_center + item_height // 2 - Emu(120000)
-            _add_textbox(slide, "→", ax, ay, arrow_gap, Emu(240000),
-                         font_size=Pt(20), bold=True, alignment="center",
+            ay = y_center + item_height // 2 - Emu(140000)
+            _add_textbox(slide, "→", ax, ay, arrow_gap, Emu(280000),
+                         font_size=Pt(22), bold=True, alignment="center",
                          color="999999", autofit=False)
 
 
@@ -1078,11 +1100,11 @@ def _render_timeline(slide, pos, items, has_tpl: bool = False):
         connector.line.color.theme_color = MSO_THEME_COLOR.ACCENT_1
     else:
         connector.line.color.rgb = _hex_to_rgb("2E75B6")
-    connector.line.width = Pt(2)
+    connector.line.width = Pt(2.5)
 
     # Nodes
     node_gap = pos.width // max(n, 1)
-    circle_size = Emu(250000)
+    circle_size = Emu(280000)
 
     for i, item in enumerate(items):
         cx = pos.left + i * node_gap + node_gap // 2
@@ -1104,16 +1126,16 @@ def _render_timeline(slide, pos, items, has_tpl: bool = False):
         tf.word_wrap = False
         p = tf.paragraphs[0]
         p.text = str(i + 1)
-        p.font.size = Pt(9)
+        p.font.size = Pt(10)
         p.font.bold = True
         p.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
         p.alignment = PP_ALIGN.CENTER
 
         # Connecting line segment from circle to label
         is_above = (i % 2 == 0)
-        label_y = line_y - Emu(600000) if is_above else line_y + Emu(350000)
+        label_y = line_y - Emu(700000) if is_above else line_y + Emu(400000)
         conn_start_y = line_y - circle_size // 2 if is_above else line_y + circle_size // 2
-        conn_end_y = label_y + Emu(400000) if is_above else label_y
+        conn_end_y = label_y + Emu(450000) if is_above else label_y
         try:
             seg = slide.shapes.add_connector(1, cx, conn_start_y, cx, conn_end_y)
             if has_tpl:
@@ -1126,16 +1148,16 @@ def _render_timeline(slide, pos, items, has_tpl: bool = False):
             pass
 
         # Label above or below (alternate)
-        label_w = Emu(min(node_gap - 50000, 1800000))
+        label_w = Emu(min(node_gap - 60000, 2000000))
         _add_textbox(slide, item.title, cx - label_w // 2, label_y,
-                     label_w, Emu(400000),
-                     font_size=Pt(9), bold=True, alignment="center")
+                     label_w, Emu(450000),
+                     font_size=Pt(10), bold=True, alignment="center")
 
         if item.description:
-            desc_y = label_y + Emu(300000)
-            _add_textbox(slide, item.description[:100], cx - label_w // 2, desc_y,
-                         label_w, Emu(300000),
-                         font_size=Pt(8), alignment="center")
+            desc_y = label_y + Emu(350000)
+            _add_textbox(slide, item.description[:80], cx - label_w // 2, desc_y,
+                         label_w, Emu(350000),
+                         font_size=Pt(9), alignment="center")
 
 
 def _render_comparison(slide, pos, items, has_tpl: bool = False):
@@ -1145,8 +1167,8 @@ def _render_comparison(slide, pos, items, has_tpl: bool = False):
     n = len(items)
     if n == 0:
         return
-    gap = Emu(120000)
-    card_width = (pos.width - gap * (n - 1)) // n
+    gap = Emu(160000)  # more breathing room between cards
+    card_width = (pos.width - gap * max(n - 1, 0)) // max(n, 1)
     card_height = pos.height
 
     for i, item in enumerate(items):
@@ -1167,34 +1189,35 @@ def _render_comparison(slide, pos, items, has_tpl: bool = False):
 
         tf = card.text_frame
         tf.word_wrap = True
-        tf.margin_left = Emu(60000)
-        tf.margin_right = Emu(60000)
-        tf.margin_top = Emu(50000)
+        tf.margin_left = config.TF_MARGIN_LEFT
+        tf.margin_right = config.TF_MARGIN_RIGHT
+        tf.margin_top = Emu(100000)
+        tf.margin_bottom = Emu(80000)
         _set_autofit(tf)
 
         p = tf.paragraphs[0]
         p.text = item.title
-        p.font.size = Pt(12)
+        p.font.size = Pt(13)
         p.font.bold = True
         p.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
         p.alignment = PP_ALIGN.CENTER
 
         if item.description:
             p2 = tf.add_paragraph()
-            p2.text = item.description[:120]
-            p2.font.size = Pt(9)
-            p2.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+            p2.text = item.description[:100]
+            p2.font.size = Pt(10)
+            p2.font.color.rgb = RGBColor(0xEE, 0xEE, 0xEE)
             p2.alignment = PP_ALIGN.CENTER
-            p2.space_before = Pt(8)
+            p2.space_before = Pt(10)
 
         if item.value:
             p3 = tf.add_paragraph()
             p3.text = item.value
-            p3.font.size = Pt(18)
+            p3.font.size = Pt(20)
             p3.font.bold = True
             p3.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
             p3.alignment = PP_ALIGN.CENTER
-            p3.space_before = Pt(12)
+            p3.space_before = Pt(14)
 
 
 def _render_kpi_cards(slide, pos, items, has_tpl: bool = False):
@@ -1205,9 +1228,9 @@ def _render_kpi_cards(slide, pos, items, has_tpl: bool = False):
     n = len(items)
     if n == 0:
         return
-    gap = Emu(120000)
-    card_width = (pos.width - gap * (n - 1)) // n
-    card_height = min(pos.height, Emu(1800000))
+    gap = Emu(160000)  # more breathing room
+    card_width = (pos.width - gap * max(n - 1, 0)) // max(n, 1)
+    card_height = min(pos.height, Emu(2000000))
     y = pos.top + (pos.height - card_height) // 2
 
     for i, item in enumerate(items):
@@ -1227,9 +1250,10 @@ def _render_kpi_cards(slide, pos, items, has_tpl: bool = False):
 
         tf = card.text_frame
         tf.word_wrap = True
-        tf.margin_top = Emu(100000)
-        tf.margin_left = Emu(50000)
-        tf.margin_right = Emu(50000)
+        tf.margin_top = Emu(140000)
+        tf.margin_left = config.TF_MARGIN_LEFT
+        tf.margin_right = config.TF_MARGIN_RIGHT
+        tf.margin_bottom = Emu(80000)
         _set_autofit(tf)
         tf.paragraphs[0].alignment = PP_ALIGN.CENTER
         tf.paragraphs[0].space_before = Pt(16)
@@ -1237,7 +1261,7 @@ def _render_kpi_cards(slide, pos, items, has_tpl: bool = False):
         # Big value
         p = tf.paragraphs[0]
         p.text = item.value or ""
-        p.font.size = Pt(28)
+        p.font.size = Pt(30)
         p.font.bold = True
         p.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
         p.alignment = PP_ALIGN.CENTER
@@ -1245,15 +1269,15 @@ def _render_kpi_cards(slide, pos, items, has_tpl: bool = False):
         # Label below
         p2 = tf.add_paragraph()
         p2.text = item.title
-        p2.font.size = Pt(11)
-        p2.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+        p2.font.size = Pt(12)
+        p2.font.color.rgb = RGBColor(0xEE, 0xEE, 0xEE)
         p2.alignment = PP_ALIGN.CENTER
-        p2.space_before = Pt(8)
+        p2.space_before = Pt(10)
 
         # Description if present
         if item.description:
             p3 = tf.add_paragraph()
-            p3.text = item.description[:80]
+            p3.text = item.description[:70]
             p3.font.size = Pt(8)
             p3.font.color.rgb = RGBColor(0xEE, 0xEE, 0xEE)
             p3.alignment = PP_ALIGN.CENTER
@@ -1264,11 +1288,12 @@ def _render_hierarchy(slide, pos, items, has_tpl: bool = False):
     n = len(items)
     if n == 0:
         return
-    item_height = min(pos.height // n - Emu(50000), Emu(800000))
+    gap = Emu(80000)
+    item_height = min((pos.height - gap * max(n - 1, 0)) // max(n, 1), Emu(900000))
 
     for i, item in enumerate(items):
-        indent = Emu(i * 200000)
-        y = pos.top + i * (item_height + Emu(60000))
+        indent = Emu(i * 220000)
+        y = pos.top + i * (item_height + gap)
         w = pos.width - indent
 
         shape = slide.shapes.add_shape(
@@ -1281,9 +1306,9 @@ def _render_hierarchy(slide, pos, items, has_tpl: bool = False):
 
         # Vertical connector to next level
         if i < n - 1:
-            cx = pos.left + indent + Emu(100000)
+            cx = pos.left + indent + Emu(120000)
             cy = y + item_height
-            next_y = pos.top + (i + 1) * (item_height + Emu(60000))
+            next_y = pos.top + (i + 1) * (item_height + gap)
             connector = slide.shapes.add_connector(
                 1, cx, cy, cx, next_y
             )
@@ -1292,18 +1317,21 @@ def _render_hierarchy(slide, pos, items, has_tpl: bool = False):
 
         tf = shape.text_frame
         tf.word_wrap = True
-        tf.margin_left = Emu(60000)
-        tf.margin_right = Emu(60000)
+        tf.margin_left = config.TF_MARGIN_LEFT
+        tf.margin_right = config.TF_MARGIN_RIGHT
+        tf.margin_top = Emu(60000)
+        tf.margin_bottom = Emu(40000)
         _set_autofit(tf)
         p = tf.paragraphs[0]
         p.text = item.title
-        p.font.size = Pt(11)
+        p.font.size = Pt(12)
         p.font.bold = True
         p.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
         p.alignment = PP_ALIGN.LEFT
 
         if item.description:
             p2 = tf.add_paragraph()
-            p2.text = item.description[:100]
-            p2.font.size = Pt(9)
-            p2.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+            p2.text = item.description[:90]
+            p2.font.size = Pt(10)
+            p2.font.color.rgb = RGBColor(0xEE, 0xEE, 0xEE)
+            p2.space_before = Pt(4)

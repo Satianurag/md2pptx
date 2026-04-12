@@ -5,7 +5,7 @@ from . import config
 
 
 # Minimum gap between adjacent elements (EMU)
-_MIN_GAP = 120000
+_MIN_GAP = 160000
 
 
 class Grid:
@@ -43,12 +43,12 @@ class Grid:
 
     def chart(self) -> Position:
         """Slightly inset area optimized for charts."""
-        inset = 200000
+        inset = 250000
         return Position(
             left=self.m_left + inset,
-            top=self.content_top + 100000,
+            top=self.content_top + 120000,
             width=self.content_w - 2 * inset,
-            height=self.content_h - 200000,
+            height=self.content_h - 240000,
         )
 
     def table(self) -> Position:
