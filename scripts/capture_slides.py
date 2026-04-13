@@ -4,16 +4,11 @@ Capture screenshots of all slides from PPTX files in the output folder.
 Uses LibreOffice headless to convert PPTX → PDF, then pdftoppm to convert PDF → PNG.
 """
 
-import os
+import argparse
 import subprocess
 import sys
 from pathlib import Path
 from typing import List
-
-
-def find_pptx_files(output_dir: Path) -> List[Path]:
-    """Find all PPTX files in the output directory."""
-    return sorted(output_dir.glob("*.pptx"))
 
 
 def convert_pptx_to_pdf(pptx_path: Path, pdf_path: Path) -> bool:
@@ -149,18 +144,25 @@ def process_presentation(pptx_path: Path, screenshots_dir: Path) -> bool:
 
 def main():
     """Main entry point."""
+    parser = argparse.ArgumentParser(description="Capture screenshots of PPTX slides")
+    parser.add_argument("files", nargs="*", help="Specific PPTX files to process (if not provided, processes all files in output/)")
+    args = parser.parse_args()
+    
     project_root = Path(__file__).parent.parent
-    output_dir = project_root / "output"
     screenshots_dir = project_root / "screenshots"
     
     # Create screenshots directory
     screenshots_dir.mkdir(exist_ok=True)
     
-    # Find all PPTX files
-    pptx_files = find_pptx_files(output_dir)
+    # Determine which files to process
+    if args.files:
+        pptx_files = [Path(f) for f in args.files]
+    else:
+        output_dir = project_root / "output"
+        pptx_files = sorted(output_dir.glob("*.pptx"))
     
     if not pptx_files:
-        print("No PPTX files found in output directory")
+        print("No PPTX files to process")
         sys.exit(0)
     
     print(f"Found {len(pptx_files)} PPTX file(s) to process\n")
@@ -168,6 +170,10 @@ def main():
     # Process each presentation
     success_count = 0
     for pptx_path in pptx_files:
+        if not pptx_path.exists():
+            print(f"File not found: {pptx_path}")
+            continue
+            
         print(f"\n{'='*60}")
         print(f"Processing: {pptx_path.name}")
         print('='*60)

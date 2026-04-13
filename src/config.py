@@ -104,15 +104,15 @@ SHAPE_PADDING = Emu(120000)   # internal padding
 
 # --- Max content per slide ---
 MAX_BULLETS_PER_SLIDE = 6
-MAX_CHARS_PER_BULLET = 140
-MAX_CHARS_PER_BULLET_CARD = 100
+MAX_CHARS_PER_BULLET = 200
+MAX_CHARS_PER_BULLET_CARD = 140
 MAX_TEXT_LINES = 8
 MAX_CARD_ITEMS = 5            # cap visual cards per slide to avoid congestion
 MAX_PROCESS_ITEMS = 5         # process flow steps per slide
 MAX_KPI_ITEMS = 4             # KPI metric cards per slide
-MAX_INFOGRAPHIC_DESC = 60     # chars for card descriptions inside grids
-MAX_CMP_DESC = 80             # chars for comparison card descriptions
-MAX_CONCLUSION_CHARS = 200    # chars per bullet on conclusion slide
+MAX_INFOGRAPHIC_DESC = 100    # chars for card descriptions inside grids
+MAX_CMP_DESC = 130            # chars for comparison card descriptions
+MAX_CONCLUSION_CHARS = 280    # chars per bullet on conclusion slide
 
 # --- Brand-aligned brightness levels for card backgrounds ---
 # Cards use ACCENT_1 with varying brightness to stay brand-consistent

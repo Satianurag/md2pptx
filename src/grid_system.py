@@ -7,7 +7,7 @@ from . import config
 logger = logging.getLogger(__name__)
 
 # Minimum gap between adjacent elements (EMU) — per Guidelines §5 "breathing space"
-_MIN_GAP = int(config.SHAPE_GAP)
+_MIN_GAP = min(int(config.SHAPE_GAP), 140000)  # cap at ~0.15in to avoid excessive whitespace
 # Footer zone: bottom 12 % of slide is reserved for footers / slide number
 _FOOTER_ZONE_RATIO = 0.12
 
@@ -246,9 +246,9 @@ class Grid:
         card_h = min(
             max(
                 (self.content_h - gap_v * max(rows - 1, 0)) // max(rows, 1),
-                800000,  # minimum card height ~0.88 in
+                900000,  # minimum card height ~1.0 in
             ),
-            self.content_h // 2,
+            int(self.content_h * 0.75) if rows == 1 else self.content_h // 2,
         )
         positions: list[Position] = []
         for idx in range(n):

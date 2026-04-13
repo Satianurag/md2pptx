@@ -1,4 +1,5 @@
 from __future__ import annotations
+import re
 import logging
 from .schemas import (
     PresentationSpec, SlideSpec, SlideElement,
@@ -166,6 +167,20 @@ def _enforce_slide_ordering(spec: PresentationSpec, result: ValidationResult, ma
             continue
         cleaned.append(s)
     slides = cleaned
+
+    # --- Remove empty content slides (no elements, not structural) ---
+    non_empty: list[SlideSpec] = []
+    for s in slides:
+        if s.slide_type in ("cover", "thank_you", "section_divider", "agenda"):
+            non_empty.append(s)
+            continue
+        if s.elements:
+            non_empty.append(s)
+        else:
+            result.fixes_applied.append(
+                f"Removed empty slide {s.slide_number} (type={s.slide_type}, no content)"
+            )
+    slides = non_empty
 
     # --- Ensure cover is first ---
     cover_slides = [s for s in slides if s.slide_type == "cover"]
@@ -408,7 +423,28 @@ def _check_element_content(slide_num: int, element: SlideElement, result: Valida
         _fix_infographic(slide_num, content, result)
 
 
+def _smart_truncate_validator(text: str, max_chars: int) -> str:
+    """Truncate text preferring sentence boundaries, no trailing ellipsis."""
+    text = text.strip()
+    if len(text) <= max_chars:
+        return text
+    candidate = text[:max_chars]
+    last_sentence_end = -1
+    for m in re.finditer(r'[.!?](?:\s|$)', candidate):
+        pos = m.start() + 1
+        if pos <= max_chars:
+            last_sentence_end = pos
+    if last_sentence_end > max_chars * 0.25:
+        return text[:last_sentence_end].strip()
+    last_space = candidate.rfind(' ')
+    if last_space > max_chars * 0.4:
+        candidate = candidate[:last_space]
+    return candidate.rstrip('.,;:- ')
+
+
 def _fix_bullets(slide_num: int, content: BulletContent, result: ValidationResult) -> None:
+    # Filter out empty bullets first
+    content.items = [b for b in content.items if b and b.strip()]
     if not content.items:
         result.warnings.append(f"Slide {slide_num}: empty bullet list")
         return
@@ -418,14 +454,10 @@ def _fix_bullets(slide_num: int, content: BulletContent, result: ValidationResul
         content.items = content.items[:config.MAX_BULLETS_PER_SLIDE]
         result.fixes_applied.append(f"Slide {slide_num}: trimmed bullets to {config.MAX_BULLETS_PER_SLIDE}")
 
-    # Enforce max chars per bullet (smart word-boundary truncation)
+    # Enforce max chars per bullet (sentence-boundary truncation)
     for i, item in enumerate(content.items):
         if len(item) > config.MAX_CHARS_PER_BULLET:
-            truncated = item[:config.MAX_CHARS_PER_BULLET]
-            last_space = truncated.rfind(' ')
-            if last_space > config.MAX_CHARS_PER_BULLET * 0.6:
-                truncated = truncated[:last_space]
-            content.items[i] = truncated.rstrip('.,;:- ') + '…'
+            content.items[i] = _smart_truncate_validator(item, config.MAX_CHARS_PER_BULLET)
             result.fixes_applied.append(f"Slide {slide_num}: truncated bullet {i + 1}")
 
 
@@ -467,18 +499,16 @@ def _fix_table(slide_num: int, content: TableContent, result: ValidationResult) 
 
 
 def _fix_text(slide_num: int, content: TextContent, result: ValidationResult) -> None:
-    if not content.text:
+    if not content.text or not content.text.strip():
         result.warnings.append(f"Slide {slide_num}: empty text element")
     elif len(content.text) > 600:
-        truncated = content.text[:600]
-        last_space = truncated.rfind(' ')
-        if last_space > 360:
-            truncated = truncated[:last_space]
-        content.text = truncated.rstrip('.,;:- ') + '…'
+        content.text = _smart_truncate_validator(content.text, 600)
         result.fixes_applied.append(f"Slide {slide_num}: truncated long text")
 
 
 def _fix_infographic(slide_num: int, content: InfographicContent, result: ValidationResult) -> None:
+    # Filter out items with empty titles
+    content.items = [it for it in content.items if it.title and it.title.strip()]
     if not content.items:
         result.warnings.append(f"Slide {slide_num}: infographic has no items")
     elif len(content.items) > 6:

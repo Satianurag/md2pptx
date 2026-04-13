@@ -40,15 +40,15 @@ def _smart_truncate(text: str, max_chars: int = 200) -> str:
         if pos <= max_chars:
             last_sentence_end = pos
 
-    # Use sentence boundary if it preserves at least 40% of allowed length
-    if last_sentence_end > max_chars * 0.4:
+    # Use sentence boundary if it preserves at least 25% of allowed length
+    if last_sentence_end > max_chars * 0.25:
         return text[:last_sentence_end].strip()
 
-    # Fall back to word-boundary cut
+    # Fall back to word-boundary cut — never cut mid-word
     last_space = candidate.rfind(' ')
-    if last_space > max_chars * 0.6:
+    if last_space > max_chars * 0.4:
         candidate = candidate[:last_space]
-    return candidate.rstrip('.,;:- ') + '…'
+    return candidate.rstrip('.,;:- ')
 
 
 # Module-level grid instance — set at the start of generate_presentation_spec()
@@ -317,20 +317,54 @@ def _find_source_sections(
     tree: ContentTree,
     content_source: list[str],
 ) -> list[ContentSection]:
-    """Find sections matching the content_source headings."""
+    """Find sections matching the content_source headings.
+
+    Uses exact match first, then substring/partial match as fallback
+    to avoid empty slides when LLM-generated headings don't match exactly.
+    """
     if not content_source:
         return []
 
     found = []
     source_lower = [s.lower().strip() for s in content_source]
+    found_headings: set[str] = set()
 
-    def search(sections: list[ContentSection]) -> None:
+    def search_exact(sections: list[ContentSection]) -> None:
         for sec in sections:
-            if sec.heading.lower().strip() in source_lower:
+            h = sec.heading.lower().strip()
+            if h in source_lower:
                 found.append(sec)
-            search(sec.subsections)
+                found_headings.add(h)
+            search_exact(sec.subsections)
 
-    search(tree.sections)
+    search_exact(tree.sections)
+
+    # Fallback: partial / substring matching for unmatched sources
+    unmatched = [s for s in source_lower if s not in found_headings]
+    if unmatched:
+        def search_partial(sections: list[ContentSection]) -> None:
+            for sec in sections:
+                h = sec.heading.lower().strip()
+                if h in found_headings:
+                    continue
+                for src in unmatched:
+                    if src in h or h in src:
+                        found.append(sec)
+                        found_headings.add(h)
+                        break
+                    # Word overlap: if ≥50% of words match
+                    src_words = set(src.split())
+                    h_words = set(h.split())
+                    if src_words and h_words:
+                        overlap = len(src_words & h_words) / min(len(src_words), len(h_words))
+                        if overlap >= 0.5:
+                            found.append(sec)
+                            found_headings.add(h)
+                            break
+                search_partial(sec.subsections)
+
+        search_partial(tree.sections)
+
     return found
 
 
@@ -804,6 +838,30 @@ def _build_chart_slide(plan: SlidePlanItem, sections: list[ContentSection]) -> S
     )
 
 
+def _detect_column_unit(table: DataTable, col_idx: int) -> str:
+    """Detect the dominant unit type of a numeric column: 'pct', 'currency', or 'raw'."""
+    pct_count = 0
+    cur_count = 0
+    total = 0
+    for row in table.rows:
+        if col_idx < len(row):
+            cell = str(row[col_idx]).strip()
+            if not cell:
+                continue
+            total += 1
+            if '%' in cell:
+                pct_count += 1
+            elif any(c in cell for c in ('$', '€', '£')):
+                cur_count += 1
+    if total == 0:
+        return "raw"
+    if pct_count / total > 0.4:
+        return "pct"
+    if cur_count / total > 0.4:
+        return "currency"
+    return "raw"
+
+
 def _extract_chart_data(table: DataTable) -> tuple[list[str], list[ChartSeries]]:
     """Extract chart-friendly data from a DataTable.
 
@@ -811,6 +869,8 @@ def _extract_chart_data(table: DataTable) -> tuple[list[str], list[ChartSeries]]
     1. Skips text-heavy columns that aren't chartable (e.g. 'Bank', 'Year').
     2. Handles N/A / missing values — rows where ALL numeric cells are NaN
        are dropped; remaining NaN values become 0.0.
+    3. Separates columns by unit type (%, $, raw) and only charts the
+       dominant unit group to prevent misleading mixed-axis visuals.
     """
     if len(table.headers) < 2 or not table.rows:
         return [], []
@@ -824,15 +884,25 @@ def _extract_chart_data(table: DataTable) -> tuple[list[str], list[ChartSeries]]
     if not numeric_col_indices:
         return [], []
 
-    # First column = categories; collect values only from numeric columns
+    # Group columns by unit type and pick the largest group
+    unit_groups: dict[str, list[int]] = {}
+    for ci in numeric_col_indices:
+        unit = _detect_column_unit(table, ci)
+        unit_groups.setdefault(unit, []).append(ci)
+
+    # Select the dominant unit group (most columns); break ties by preferring raw > currency > pct
+    best_unit = max(unit_groups, key=lambda u: (len(unit_groups[u]), {"raw": 2, "currency": 1, "pct": 0}.get(u, 0)))
+    selected_cols = unit_groups[best_unit]
+
+    # First column = categories; collect values only from selected columns
     raw_categories: list[str] = []
-    raw_values: dict[int, list[float]] = {ci: [] for ci in numeric_col_indices}
+    raw_values: dict[int, list[float]] = {ci: [] for ci in selected_cols}
 
     for row in table.rows[:20]:  # cap rows
         if not row:
             continue
         raw_categories.append(str(row[0])[:30])
-        for ci in numeric_col_indices:
+        for ci in selected_cols:
             val = _parse_number(row[ci] if ci < len(row) else "")
             raw_values[ci].append(val)
 
@@ -840,7 +910,7 @@ def _extract_chart_data(table: DataTable) -> tuple[list[str], list[ChartSeries]]
     keep_mask = []
     for row_idx in range(len(raw_categories)):
         has_value = any(
-            not math.isnan(raw_values[ci][row_idx]) for ci in numeric_col_indices
+            not math.isnan(raw_values[ci][row_idx]) for ci in selected_cols
         )
         keep_mask.append(has_value)
 
@@ -849,7 +919,7 @@ def _extract_chart_data(table: DataTable) -> tuple[list[str], list[ChartSeries]]
         return [], []
 
     series_list = []
-    for ci in numeric_col_indices:
+    for ci in selected_cols:
         name = table.headers[ci][:30]
         values = [
             (0.0 if math.isnan(v) else v)
@@ -945,9 +1015,19 @@ def _build_kpi_slide(
     )
 
 
+_YEAR_RE = re.compile(r'\b((?:19|20)\d{2})\b')
+
+
+def _extract_year_from_text(text: str) -> str | None:
+    """Extract a 4-digit year from text for timeline labels."""
+    m = _YEAR_RE.search(text)
+    return m.group(1) if m else None
+
+
 def _build_infographic_slide(plan: SlidePlanItem, sections: list[ContentSection]) -> SlideSpec | None:
     """Build an infographic slide."""
     infographic_type = plan.infographic_type_hint or "process_flow"
+    is_timeline = infographic_type == "timeline"
 
     items = []
     for sec in sections:
@@ -955,18 +1035,24 @@ def _build_infographic_slide(plan: SlidePlanItem, sections: list[ContentSection]
         if sec.subsections:
             for sub in sec.subsections[:6]:
                 desc = _smart_truncate(sub.text, 150) if sub.text else (_smart_truncate(sub.bullets[0], 150) if sub.bullets else "")
-                items.append(InfographicItem(
-                    title=_smart_truncate(sub.heading, 80),
-                    description=desc,
-                    value=sub.metrics[0].value if sub.metrics else None,
-                ))
+                title = _smart_truncate(sub.heading, 80)
+                value = sub.metrics[0].value if sub.metrics else None
+                # For timelines, try to extract year from heading/text
+                if is_timeline and not value:
+                    value = _extract_year_from_text(sub.heading) or _extract_year_from_text(sub.text or "")
+                if title.strip():  # skip empty items
+                    items.append(InfographicItem(title=title, description=desc, value=value))
         elif sec.bullets:
             for b in sec.bullets[:6]:
                 # Split bullet into title and description
                 parts = b.split(":", 1) if ":" in b else (b.split("–", 1) if "–" in b else [b])
                 title = _smart_truncate(parts[0].strip(), 80)
                 desc = _smart_truncate(parts[1].strip(), 150) if len(parts) > 1 else ""
-                items.append(InfographicItem(title=title, description=desc))
+                value = None
+                if is_timeline:
+                    value = _extract_year_from_text(b)
+                if title.strip():  # skip empty items
+                    items.append(InfographicItem(title=title, description=desc, value=value))
 
     if not items:
         return None
@@ -998,26 +1084,34 @@ def _build_infographic_slide_with_type(
     infographic_type: str,
 ) -> SlideSpec | None:
     """Build an infographic slide with a specific type (used by infographic-first detection)."""
+    is_timeline = infographic_type == "timeline"
     items = []
     for sec in sections:
         if sec.subsections:
             for sub in sec.subsections[:6]:
                 desc = _smart_truncate(sub.text, 100) if sub.text else (_smart_truncate(sub.bullets[0], 100) if sub.bullets else "")
-                items.append(InfographicItem(
-                    title=_smart_truncate(sub.heading, 50),
-                    description=desc,
-                    value=sub.metrics[0].value if sub.metrics else None,
-                ))
+                title = _smart_truncate(sub.heading, 50)
+                value = sub.metrics[0].value if sub.metrics else None
+                if is_timeline and not value:
+                    value = _extract_year_from_text(sub.heading) or _extract_year_from_text(sub.text or "")
+                if title.strip():
+                    items.append(InfographicItem(title=title, description=desc, value=value))
         elif sec.bullets:
             for b in sec.bullets[:6]:
                 parts = b.split(":", 1) if ":" in b else (b.split("–", 1) if "–" in b else [b])
                 title = _smart_truncate(parts[0].strip(), 50)
                 desc = _smart_truncate(parts[1].strip(), 100) if len(parts) > 1 else ""
-                items.append(InfographicItem(title=title, description=desc))
+                value = _extract_year_from_text(b) if is_timeline else None
+                if title.strip():
+                    items.append(InfographicItem(title=title, description=desc, value=value))
         elif sec.text:
-            sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', sec.text) if s.strip()]
+            sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', sec.text) if len(s.strip()) > 15]
             for s in sentences[:6]:
-                items.append(InfographicItem(title=_smart_truncate(s, 50), description=_smart_truncate(s[50:], 100) if len(s) > 50 else ""))
+                title = _smart_truncate(s, 50)
+                desc = _smart_truncate(s[50:], 100) if len(s) > 50 else ""
+                value = _extract_year_from_text(s) if is_timeline else None
+                if title.strip():
+                    items.append(InfographicItem(title=title, description=desc, value=value))
 
     if len(items) < 2:
         return None
@@ -1213,21 +1307,30 @@ def _build_conclusion_slide(
             if len(cleaned) >= config.MAX_BULLETS_PER_SLIDE:
                 break
 
-    # Source 5: synthesize from section headings if still too few
+    # Source 5: extract first meaningful sentence from each section (no synthetic placeholders)
     if len(cleaned) < 3:
         for sec in tree.sections[:8]:
-            heading = sec.heading.strip() if sec.heading else ""
-            if heading:
-                synth = f"Key findings in {heading}"
-                key = synth.lower()[:40]
+            candidate = ""
+            # Prefer a real sentence from the section text
+            if sec.text:
+                sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', sec.text) if len(s.strip()) > 20]
+                candidate = sentences[0] if sentences else ""
+            # Fallback to first substantial bullet
+            if not candidate and sec.bullets:
+                substantial = [b.strip() for b in sec.bullets if len(b.strip()) > 20]
+                candidate = substantial[0] if substantial else ""
+            if candidate:
+                key = candidate.lower()[:40]
                 if key not in seen:
                     seen.add(key)
-                    cleaned.append(synth)
+                    cleaned.append(candidate)
             if len(cleaned) >= config.MAX_BULLETS_PER_SLIDE:
                 break
 
     if not cleaned:
-        cleaned = ["Key findings and strategic recommendations from this analysis"]
+        # Use the deck title for a professional summary instead of generic placeholder
+        deck_title = tree.title.strip() if tree.title else "this analysis"
+        cleaned = [f"This report presents key findings and strategic recommendations regarding {deck_title}."]
 
     _max_chars = getattr(config, 'MAX_CONCLUSION_CHARS', config.MAX_CHARS_PER_BULLET)
     bullets = [_smart_truncate(b, _max_chars) for b in cleaned[:config.MAX_BULLETS_PER_SLIDE]]
@@ -1380,13 +1483,21 @@ def _parse_llm_slide_response(raw: str, plan_item: SlidePlanItem) -> SlideSpec:
 
 
 def _fallback_text_slide(plan_item: SlidePlanItem, source_text: str) -> SlideSpec:
-    """Create a minimal text slide as fallback."""
-    text = plan_item.key_message or source_text[:300] or "Content pending"
+    """Create a minimal text slide as fallback — never show placeholder text."""
+    text = ""
+    if plan_item.key_message and plan_item.key_message.strip():
+        text = plan_item.key_message.strip()
+    elif source_text and source_text.strip():
+        # Extract first few real sentences from source instead of raw dump
+        sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', source_text) if len(s.strip()) > 15]
+        text = " ".join(sentences[:4])[:500]
+    if not text:
+        text = plan_item.title or "Overview"
     elements = [
         SlideElement(
             element_type="text",
             position=_grid.full(),
-            content=TextContent(text=text, font_size=14),
+            content=TextContent(text=_smart_truncate(text, 400), font_size=14),
         )
     ]
     return SlideSpec(

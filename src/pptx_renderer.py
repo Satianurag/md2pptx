@@ -204,7 +204,7 @@ def _populate_text_list(text_frame, items: list[str], font_size, prefix: str = "
         p.line_spacing = Pt(int(font_size.pt * 1.4)) if hasattr(font_size, 'pt') else None
         if idx > 0:
             p.space_before = config.BULLET_SPACE_BEFORE
-    _set_autofit(text_frame)
+    _set_autofit(text_frame, shrink_ok=True)
 
 
 def _apply_light_surface_fill(shape, has_tpl: bool, brightness: float = 0.96,
@@ -613,18 +613,6 @@ def _add_title_bar(slide, title: str, subtitle: str | None = None, has_tpl: bool
         p2.font.color.rgb = RGBColor(0x66, 0x66, 0x66)
         p2.alignment = PP_ALIGN.LEFT
 
-    # Accent line under title with gradient
-    accent_y = Emu(config.MARGIN_TOP + (950000 if subtitle else 600000))
-    accent = slide.shapes.add_shape(
-        MSO_SHAPE.RECTANGLE, config.MARGIN_LEFT, accent_y,
-        Emu(2400000), Emu(36000)
-    )
-    if has_tpl:
-        style_accent_bar(accent, theme_color=MSO_THEME_COLOR.ACCENT_1, angle=0.0)
-    else:
-        add_gradient(accent, [(0.0, _hex_to_rgb("4472C4")), (1.0, _hex_to_rgb("5B9BD5"))], angle=0.0)
-        remove_outline(accent)
-
 
 # ── Slide furniture (footer bar, accent stripe) ──────────────────────
 
@@ -768,10 +756,10 @@ def _render_bullets(slide, pos, content: BulletContent, has_tpl: bool = False,
 def _render_agenda_bullets(slide, pos, items: list[str], font_size, has_tpl: bool) -> None:
     cols = 2 if len(items) > 4 else 1
     rows = (len(items) + cols - 1) // cols
-    gap_h = Emu(200000)
-    gap_v = Emu(160000)
+    gap_h = Emu(160000)
+    gap_v = Emu(120000)
     card_w = (pos.width - gap_h * max(cols - 1, 0)) // max(cols, 1)
-    card_h = min((pos.height - gap_v * max(rows - 1, 0)) // max(rows, 1), Emu(800000))
+    card_h = min((pos.height - gap_v * max(rows - 1, 0)) // max(rows, 1), Emu(1000000))
 
     for idx, item in enumerate(items):
         col = idx % cols
@@ -807,10 +795,10 @@ def _render_agenda_bullets(slide, pos, items: list[str], font_size, has_tpl: boo
 def _render_summary_bullets(slide, pos, items: list[str], font_size, has_tpl: bool) -> None:
     cols = 2 if len(items) >= 4 else 1
     rows = (len(items) + cols - 1) // cols
-    gap_h = Emu(200000)
-    gap_v = Emu(180000)
+    gap_h = Emu(160000)
+    gap_v = Emu(120000)
     card_w = (pos.width - gap_h * max(cols - 1, 0)) // max(cols, 1)
-    card_h = min((pos.height - gap_v * max(rows - 1, 0)) // max(rows, 1), Emu(1100000))
+    card_h = min((pos.height - gap_v * max(rows - 1, 0)) // max(rows, 1), Emu(1600000))
 
     for idx, item in enumerate(items):
         col = idx % cols
@@ -849,15 +837,15 @@ def _render_content_bullets(slide, pos, items: list[str], font_size, has_tpl: bo
         stripe.fill.fore_color.rgb = _hex_to_rgb("4472C4")
         stripe.line.fill.background()
 
-    inner_left = pos.left + Emu(200000)
-    pad_v = Emu(120000)
-    inner_width = pos.width - Emu(320000)
+    inner_left = pos.left + Emu(160000)
+    pad_v = Emu(80000)
+    inner_width = pos.width - Emu(260000)
     inner_height = pos.height - 2 * pad_v
 
     # Estimate content height and vertically center when content is short
     est_line_h = Emu(280000)  # ~0.31 inches per bullet line
     est_content_h = min(len(items) * est_line_h, inner_height)
-    v_offset = max(Emu(0), (inner_height - est_content_h) // 3)  # bias toward upper-third
+    v_offset = max(Emu(0), (inner_height - est_content_h) // 5)  # minimal bias to use space
     inner_top = pos.top + pad_v + v_offset
     inner_height = inner_height - v_offset
 
@@ -1230,12 +1218,15 @@ def _render_timeline(slide, pos, items, has_tpl: bool = False):
             add_shadow(circle, preset="subtle")
             remove_outline(circle)
 
-        # Step number inside circle
+        # Show year/value inside circle if available, otherwise step number
+        circle_label = str(i + 1)
+        if item.value and item.value.strip():
+            circle_label = item.value.strip()
         tf = circle.text_frame
         tf.word_wrap = False
         p = tf.paragraphs[0]
-        p.text = str(i + 1)
-        p.font.size = Pt(10)
+        p.text = circle_label
+        p.font.size = Pt(8 if len(circle_label) > 2 else 10)
         p.font.bold = True
         p.font.color.rgb = _hex_to_rgb(pick_text_color("2B5797"))
         p.alignment = PP_ALIGN.CENTER
@@ -1257,14 +1248,28 @@ def _render_timeline(slide, pos, items, has_tpl: bool = False):
             pass
 
         # Label above or below (alternate)
-        label_w = Emu(min(node_gap - 60000, 2000000))
-        _add_textbox(slide, item.title, cx - label_w // 2, label_y,
-                     label_w, Emu(450000),
+        label_w = Emu(min(node_gap - 60000, 2400000))
+
+        # Show year above the title if item has a value and it's not already in the circle
+        title_text = item.title
+        if item.value and item.value.strip() and len(item.value.strip()) > 2:
+            # Year/value shown as bold header above the title
+            _add_textbox(slide, item.value.strip(), cx - label_w // 2, label_y,
+                         label_w, Emu(200000),
+                         font_size=Pt(11), bold=True, alignment="center",
+                         color="2B5797")
+            title_y = label_y + Emu(180000)
+        else:
+            title_y = label_y
+
+        _add_textbox(slide, title_text, cx - label_w // 2, title_y,
+                     label_w, Emu(350000),
                      font_size=Pt(10), bold=True, alignment="center")
 
         if item.description:
-            desc_y = label_y + Emu(350000)
-            _add_textbox(slide, item.description[:80], cx - label_w // 2, desc_y,
+            desc_y = title_y + Emu(300000)
+            _add_textbox(slide, item.description[:config.MAX_INFOGRAPHIC_DESC],
+                         cx - label_w // 2, desc_y,
                          label_w, Emu(350000),
                          font_size=Pt(9), alignment="center")
 
