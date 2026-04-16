@@ -42,29 +42,28 @@ cp .env.example .env
 
 ## Usage
 
-### Single file
+### Basic usage (template is required)
 ```bash
-python main.py --input path/to/report.md
+python main.py --input path/to/report.md --template templates/your_template.pptx
 ```
 
-### With template and custom slide count
+### With custom slide count (10–15)
 ```bash
-python main.py --input report.md --template template.pptx --slides 14
+python main.py --input report.md --template template.pptx --slides 12
 ```
 
-### Batch processing
+### With verbose logging
 ```bash
-python main.py --input path/to/test_cases/ --batch
+python main.py --input report.md --template template.pptx --verbose
 ```
 
 ### Options
 | Flag | Description | Default |
 |------|-------------|---------|
-| `--input, -i` | Markdown file or directory (batch) | Required |
-| `--template, -t` | .pptx template path | Auto-detect |
+| `--input, -i` | Markdown file path | **Required** |
+| `--template, -t` | .pptx template path | **Required** |
 | `--output, -o` | Output .pptx path | `output/<name>.pptx` |
-| `--slides, -s` | Target slide count (10-15) | 12 |
-| `--batch, -b` | Process all .md files in directory | Off |
+| `--slides, -s` | Target slide count (10–15) | `15` |
 | `--verbose, -v` | Verbose logging | Off |
 
 ## Key Design Decisions

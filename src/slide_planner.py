@@ -182,18 +182,25 @@ def plan_slides(
         layout_names = [l.name for l in master_info.layouts]
         layouts_info = f"\nAVAILABLE TEMPLATE LAYOUTS: {', '.join(layout_names)}"
 
-    # When a template is used, it provides the closing slide — LLM should not plan one
+    # When a template is used, it provides cover + closing bookend slides.
+    # The renderer skips the LLM's cover and thank_you, using template's instead.
+    # So LLM must plan (target - 1) slides to hit the right total:
+    #   template_cover(1) + LLM_content(plan - 1 for cover skip) + template_closing(1) = target
+    #   → plan = target - 1
     bookend_note = ""
+    llm_target = target_slide_count
     if master_info:
+        llm_target = target_slide_count - 1
         bookend_note = (
             "\nIMPORTANT: A template is being used that provides the closing/thank-you slide. "
             "Do NOT include a thank_you slide in your plan — the template handles it. "
-            "Your plan should end with the conclusion slide."
+            f"Your plan should have EXACTLY {llm_target} slides (cover through conclusion). "
+            "The template will add the closing slide automatically to reach the final target."
         )
 
     user_prompt = (
         f"Create a slide plan for the following content. "
-        f"Target {target_slide_count} slides (must be {min_slides}-{max_slides}).\n\n"
+        f"Target EXACTLY {llm_target} slides (must be {min_slides}-{max_slides}).\n\n"
         f"{condensed}\n"
         f"{layouts_info}\n"
         f"{profile_context}\n"
