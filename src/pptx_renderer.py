@@ -650,18 +650,39 @@ def _add_title_bar(slide, title: str, subtitle: str | None = None, has_tpl: bool
 # ── Slide furniture (footer bar, accent stripe) ──────────────────────
 
 def _add_slide_furniture(slide, spec: SlideSpec, has_tpl: bool, deck_title: str):
-    """Add footer bar with deck title + slide number, and left accent stripe."""
-    if has_tpl:
-        return
-    # ── Footer bar ──
-    footer_h = Emu(300000)
+    """Add footer bar, accent stripe, title underline, and decorative elements.
+
+    Works for BOTH template-based and standalone slides.  When *has_tpl* is
+    True the function uses **theme colours** so that every decoration
+    automatically adapts to the loaded Slide-Master palette.
+    """
+    # ── 1. Footer accent bar (full-width, bottom) ──
+    footer_h = Emu(680000) if has_tpl else Emu(300000)
     footer_y = _sh - footer_h
-    footer = slide.shapes.add_shape(
-        MSO_SHAPE.RECTANGLE, 0, footer_y, _sw, footer_h
-    )
-    footer.fill.solid()
-    footer.fill.fore_color.rgb = _hex_to_rgb("F2F2F2")
-    footer.line.fill.background()
+    footer = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, footer_y, _sw, footer_h)
+    if has_tpl:
+        footer.fill.solid()
+        footer.fill.fore_color.theme_color = MSO_THEME_COLOR.TEXT_2
+        footer.line.fill.background()
+    else:
+        footer.fill.solid()
+        footer.fill.fore_color.rgb = _hex_to_rgb("F2F2F2")
+        footer.line.fill.background()
+
+    # Separator lines inside footer (template-only, evenly spaced)
+    if has_tpl:
+        n_sep = 4
+        seg_w = _sw // (n_sep + 1)
+        for i in range(n_sep):
+            sx = seg_w * (i + 1)
+            try:
+                sep = slide.shapes.add_connector(
+                    1, sx, footer_y + Emu(100000), sx, _sh - Emu(100000)
+                )
+                sep.line.color.theme_color = MSO_THEME_COLOR.BACKGROUND_1
+                sep.line.width = Pt(0.5)
+            except Exception:
+                pass
 
     # Footer text — deck title
     if deck_title:
@@ -675,7 +696,10 @@ def _add_slide_furniture(slide, spec: SlideSpec, has_tpl: bool, deck_title: str)
         p.text = deck_title[:80]
         p.font.size = Pt(8)
         p.font.name = config.FONT_NAME_PRIMARY
-        p.font.color.rgb = RGBColor(0x88, 0x88, 0x88)
+        if has_tpl:
+            p.font.color.theme_color = MSO_THEME_COLOR.BACKGROUND_1
+        else:
+            p.font.color.rgb = RGBColor(0x88, 0x88, 0x88)
         p.alignment = PP_ALIGN.LEFT
 
     # Slide number
@@ -690,15 +714,97 @@ def _add_slide_furniture(slide, spec: SlideSpec, has_tpl: bool, deck_title: str)
     p2.font.size = Pt(9)
     p2.font.name = config.FONT_NAME_PRIMARY
     p2.font.bold = True
-    p2.font.color.rgb = RGBColor(0x88, 0x88, 0x88)
+    if has_tpl:
+        p2.font.color.theme_color = MSO_THEME_COLOR.BACKGROUND_1
+    else:
+        p2.font.color.rgb = RGBColor(0x88, 0x88, 0x88)
     p2.alignment = PP_ALIGN.RIGHT
 
-    # ── Left accent stripe with vertical gradient ──
+    # ── 2. Left accent stripe (thin vertical bar) ──
+    stripe_w = Emu(50000) if has_tpl else Emu(60000)
     stripe = slide.shapes.add_shape(
-        MSO_SHAPE.RECTANGLE, 0, 0, Emu(60000), _sh - footer_h
+        MSO_SHAPE.RECTANGLE, 0, 0, stripe_w, footer_y
     )
-    add_gradient(stripe, [(0.0, _hex_to_rgb("4472C4")), (1.0, _hex_to_rgb("2B579A"))], angle=270.0)
-    remove_outline(stripe)
+    if has_tpl:
+        style_accent_bar(stripe, theme_color=MSO_THEME_COLOR.ACCENT_1, angle=270.0)
+    else:
+        add_gradient(stripe, [(0.0, _hex_to_rgb("4472C4")), (1.0, _hex_to_rgb("2B579A"))], angle=270.0)
+        remove_outline(stripe)
+
+    # ── 3. Title accent underline ──
+    underline_y = Emu(1220000)
+    underline_w = Emu(2200000)
+    underline = slide.shapes.add_shape(
+        MSO_SHAPE.RECTANGLE,
+        config.MARGIN_LEFT, underline_y,
+        underline_w, Emu(36000)
+    )
+    if has_tpl:
+        style_accent_bar(underline, theme_color=MSO_THEME_COLOR.ACCENT_1, angle=0.0)
+    else:
+        add_gradient(underline, [(0.0, _hex_to_rgb("4472C4")), (1.0, _hex_to_rgb("2B579A"))], angle=0.0)
+        remove_outline(underline)
+
+    # ── 4. Top-right decorative chevron ──
+    chev_size = Emu(180000)
+    chev = slide.shapes.add_shape(
+        MSO_SHAPE.CHEVRON,
+        _sw - Emu(600000), Emu(200000),
+        chev_size, chev_size
+    )
+    if has_tpl:
+        chev.fill.solid()
+        chev.fill.fore_color.theme_color = MSO_THEME_COLOR.ACCENT_1
+        chev.fill.fore_color.brightness = 0.6
+    else:
+        chev.fill.solid()
+        chev.fill.fore_color.rgb = _hex_to_rgb("D6E4F0")
+    chev.line.fill.background()
+
+    # Second chevron (slightly offset for layered effect)
+    chev2 = slide.shapes.add_shape(
+        MSO_SHAPE.CHEVRON,
+        _sw - Emu(420000), Emu(200000),
+        chev_size, chev_size
+    )
+    if has_tpl:
+        chev2.fill.solid()
+        chev2.fill.fore_color.theme_color = MSO_THEME_COLOR.ACCENT_1
+        chev2.fill.fore_color.brightness = 0.8
+    else:
+        chev2.fill.solid()
+        chev2.fill.fore_color.rgb = _hex_to_rgb("E8F0FA")
+    chev2.line.fill.background()
+
+    # ── 5. Horizontal separator line above footer ──
+    try:
+        sep_line = slide.shapes.add_connector(
+            1, config.MARGIN_LEFT, footer_y - Emu(40000),
+            Emu(_sw - int(config.MARGIN_RIGHT)), footer_y - Emu(40000)
+        )
+        if has_tpl:
+            sep_line.line.color.theme_color = MSO_THEME_COLOR.ACCENT_1
+            sep_line.line.width = Pt(1.5)
+        else:
+            sep_line.line.color.rgb = _hex_to_rgb("4472C4")
+            sep_line.line.width = Pt(1.5)
+    except Exception:
+        pass
+
+    # ── 6. Small decorative circle (bottom-left of content area) ──
+    circle_sz = Emu(140000)
+    circle = slide.shapes.add_shape(
+        MSO_SHAPE.OVAL,
+        config.MARGIN_LEFT, footer_y - Emu(220000),
+        circle_sz, circle_sz
+    )
+    if has_tpl:
+        circle.fill.solid()
+        circle.fill.fore_color.theme_color = MSO_THEME_COLOR.ACCENT_1
+    else:
+        circle.fill.solid()
+        circle.fill.fore_color.rgb = _hex_to_rgb("4472C4")
+    circle.line.fill.background()
 
 
 # ── Element renderer dispatch ───────────────────────────────────────
@@ -852,12 +958,15 @@ def _render_agenda_bullets(slide, pos, items: list[str], font_size, has_tpl: boo
 
 
 def _render_summary_bullets(slide, pos, items: list[str], font_size, has_tpl: bool) -> None:
+    """Render executive summary / conclusion bullets as rich cards with badges and connectors."""
     cols = 2 if len(items) >= 4 else 1
     rows = (len(items) + cols - 1) // cols
     gap_h = Emu(160000)
-    gap_v = Emu(120000)
+    gap_v = Emu(140000)
     card_w = (pos.width - gap_h * max(cols - 1, 0)) // max(cols, 1)
     card_h = min((pos.height - gap_v * max(rows - 1, 0)) // max(rows, 1), Emu(1600000))
+    badge_sz = Emu(260000)
+    accent_h = Emu(50000)
 
     for idx, item in enumerate(items):
         col = idx % cols
@@ -870,7 +979,8 @@ def _render_summary_bullets(slide, pos, items: list[str], font_size, has_tpl: bo
         add_shadow(card, preset="subtle")
         set_corner_radius(card, 8000)
 
-        accent = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, x, y, card_w, Emu(50000))
+        # Top accent bar
+        accent = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, x, y, card_w, accent_h)
         if has_tpl:
             style_accent_bar(accent, theme_color=MSO_THEME_COLOR.ACCENT_1)
         else:
@@ -878,54 +988,173 @@ def _render_summary_bullets(slide, pos, items: list[str], font_size, has_tpl: bo
             accent.fill.fore_color.rgb = _hex_to_rgb("4472C4")
             remove_outline(accent)
 
-        tx = slide.shapes.add_textbox(x + Emu(140000), y + Emu(130000), card_w - Emu(280000), card_h - Emu(210000))
-        # Use JetBrains Mono for code-like items, Inter for normal text
+        # Numbered badge
+        bx = x + Emu(120000)
+        by = y - badge_sz // 3
+        badge = slide.shapes.add_shape(MSO_SHAPE.OVAL, bx, by, badge_sz, badge_sz)
+        if has_tpl:
+            style_numbered_circle(badge, MSO_THEME_COLOR.ACCENT_1)
+        else:
+            badge.fill.solid()
+            badge.fill.fore_color.rgb = _hex_to_rgb("4472C4")
+            add_shadow(badge, preset="subtle")
+            remove_outline(badge)
+        _set_text_frame_text(
+            badge.text_frame, str(idx + 1),
+            font_size=Pt(11), bold=True, alignment=PP_ALIGN.CENTER,
+            color_rgb=RGBColor(0xFF, 0xFF, 0xFF),
+            font_name=config.FONT_NAME_PRIMARY,
+        )
+
+        tx = slide.shapes.add_textbox(x + Emu(140000), y + accent_h + Emu(80000),
+                                       card_w - Emu(280000), card_h - accent_h - Emu(160000))
         item_font = config.FONT_NAME_MONO if _looks_like_code(item) else config.FONT_NAME_PRIMARY
         _populate_text_list(tx.text_frame, [item], font_size, font_name=item_font)
 
+        # Connector line below card (between rows)
+        if row < rows - 1:
+            try:
+                sep_y = y + card_h + gap_v // 2
+                sep = slide.shapes.add_connector(
+                    1, x + Emu(80000), sep_y, x + card_w - Emu(80000), sep_y
+                )
+                if has_tpl:
+                    sep.line.color.theme_color = MSO_THEME_COLOR.ACCENT_1
+                else:
+                    sep.line.color.rgb = _hex_to_rgb("B0C4DE")
+                sep.line.width = Pt(0.75)
+            except Exception:
+                pass
+
+    # Vertical separator between columns
+    if cols > 1:
+        vx = pos.left + card_w + gap_h // 2
+        try:
+            vsep = slide.shapes.add_connector(
+                1, vx, pos.top + Emu(40000), vx, pos.top + rows * card_h + (rows - 1) * gap_v - Emu(40000)
+            )
+            if has_tpl:
+                vsep.line.color.theme_color = MSO_THEME_COLOR.ACCENT_1
+            else:
+                vsep.line.color.rgb = _hex_to_rgb("B0C4DE")
+            vsep.line.width = Pt(0.5)
+        except Exception:
+            pass
+
 
 def _render_content_bullets(slide, pos, items: list[str], font_size, has_tpl: bool) -> None:
-    panel = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, pos.left, pos.top, pos.width, pos.height)
-    _apply_light_surface_fill(panel, has_tpl, brightness=0.985, fallback_hex="FBFCFE")
-    add_shadow(panel, preset="subtle")
-    set_corner_radius(panel, 6000)
+    """Render content bullets as a professional card grid with decorative elements.
 
-    stripe = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, pos.left, pos.top, Emu(70000), pos.height)
-    if has_tpl:
-        style_accent_bar(stripe, theme_color=MSO_THEME_COLOR.ACCENT_1, angle=270.0)
-    else:
-        stripe.fill.solid()
-        stripe.fill.fore_color.rgb = _hex_to_rgb("4472C4")
-        stripe.line.fill.background()
-
-    inner_left = pos.left + Emu(160000)
-    pad_v = Emu(80000)
-    inner_width = pos.width - Emu(260000)
-    inner_height = pos.height - 2 * pad_v
-
-    # Estimate content height and vertically center when content is short
-    est_line_h = Emu(280000)  # ~0.31 inches per bullet line
-    est_content_h = min(len(items) * est_line_h, inner_height)
-    v_offset = max(Emu(0), (inner_height - est_content_h) // 5)  # minimal bias to use space
-    inner_top = pos.top + pad_v + v_offset
-    inner_height = inner_height - v_offset
-
-    # Determine font: use JetBrains Mono if any item looks like code, otherwise Inter
-    bullet_font = config.FONT_NAME_MONO if any(_looks_like_code(item) for item in items) else config.FONT_NAME_PRIMARY
-
-    split_columns = len(items) >= 5 and pos.width >= Emu(7000000)
-    if split_columns:
-        gap = Emu(200000)
-        col_width = (inner_width - gap) // 2
-        midpoint = (len(items) + 1) // 2
-        left_box = slide.shapes.add_textbox(inner_left, inner_top, col_width, inner_height)
-        right_box = slide.shapes.add_textbox(inner_left + col_width + gap, inner_top, col_width, inner_height)
-        _populate_text_list(left_box.text_frame, items[:midpoint], font_size, prefix="• ", font_name=bullet_font)
-        _populate_text_list(right_box.text_frame, items[midpoint:], font_size, prefix="• ", font_name=bullet_font)
+    Each bullet becomes its own card with a numbered accent badge, accent top
+    bar, and separator line — matching the shape density and visual quality of
+    reference PPTXs (~25 shapes per content slide).
+    """
+    n = len(items)
+    if n == 0:
         return
 
-    tx = slide.shapes.add_textbox(inner_left, inner_top, inner_width, inner_height)
-    _populate_text_list(tx.text_frame, items, font_size, prefix="• ", font_name=bullet_font)
+    bullet_font = (config.FONT_NAME_MONO
+                    if any(_looks_like_code(item) for item in items)
+                    else config.FONT_NAME_PRIMARY)
+
+    # ── Layout: decide grid dimensions ──
+    if n <= 2:
+        cols, rows = n, 1
+    elif n <= 4:
+        cols, rows = min(n, 2), (n + 1) // 2
+    else:
+        cols, rows = min(n, 3), (n + 2) // 3
+
+    gap_h = Emu(140000)
+    gap_v = Emu(120000)
+    card_w = (pos.width - gap_h * max(cols - 1, 0)) // max(cols, 1)
+    card_h = min(
+        (pos.height - gap_v * max(rows - 1, 0)) // max(rows, 1),
+        Emu(2800000),
+    )
+
+    badge_sz = Emu(240000)  # numbered circle badge
+    accent_bar_h = Emu(50000)  # top accent bar height
+
+    for idx, item in enumerate(items):
+        col = idx % cols
+        row = idx // cols
+        x = pos.left + col * (card_w + gap_h)
+        y = pos.top + row * (card_h + gap_v)
+
+        # ── Card background rectangle ──
+        card = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, x, y, card_w, card_h)
+        _apply_light_surface_fill(card, has_tpl, brightness=0.97, fallback_hex="F8FAFD")
+        add_shadow(card, preset="subtle")
+
+        # ── Top accent bar ──
+        accent = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, x, y, card_w, accent_bar_h)
+        if has_tpl:
+            style_accent_bar(accent, theme_color=MSO_THEME_COLOR.ACCENT_1)
+        else:
+            accent.fill.solid()
+            accent.fill.fore_color.rgb = _hex_to_rgb("4472C4")
+            remove_outline(accent)
+
+        # ── Numbered badge (circle overlapping top-left corner) ──
+        badge_x = x + Emu(100000)
+        badge_y = y - badge_sz // 3
+        badge = slide.shapes.add_shape(MSO_SHAPE.OVAL, badge_x, badge_y, badge_sz, badge_sz)
+        if has_tpl:
+            style_numbered_circle(badge, MSO_THEME_COLOR.ACCENT_1)
+        else:
+            badge.fill.solid()
+            badge.fill.fore_color.rgb = _hex_to_rgb("4472C4")
+            add_shadow(badge, preset="subtle")
+            remove_outline(badge)
+        _set_text_frame_text(
+            badge.text_frame,
+            str(idx + 1),
+            font_size=Pt(11),
+            bold=True,
+            alignment=PP_ALIGN.CENTER,
+            color_rgb=RGBColor(0xFF, 0xFF, 0xFF),
+            font_name=config.FONT_NAME_PRIMARY,
+        )
+
+        # ── Text content inside card ──
+        tx = slide.shapes.add_textbox(
+            x + Emu(100000), y + accent_bar_h + Emu(60000),
+            card_w - Emu(200000), card_h - accent_bar_h - Emu(120000),
+        )
+        _populate_text_list(tx.text_frame, [item], font_size, font_name=bullet_font)
+
+        # ── Bottom separator line ──
+        try:
+            sep_y = y + card_h + gap_v // 2
+            if row < rows - 1:  # horizontal between rows
+                sep = slide.shapes.add_connector(
+                    1, x + Emu(60000), sep_y, x + card_w - Emu(60000), sep_y
+                )
+                if has_tpl:
+                    sep.line.color.theme_color = MSO_THEME_COLOR.ACCENT_1
+                    sep.line.width = Pt(0.75)
+                else:
+                    sep.line.color.rgb = _hex_to_rgb("B0C4DE")
+                    sep.line.width = Pt(0.75)
+        except Exception:
+            pass
+
+    # ── Vertical separators between columns ──
+    for c in range(1, cols):
+        vx = pos.left + c * (card_w + gap_h) - gap_h // 2
+        try:
+            vsep = slide.shapes.add_connector(
+                1, vx, pos.top + Emu(60000), vx, pos.top + card_h * rows + gap_v * (rows - 1) - Emu(60000)
+            )
+            if has_tpl:
+                vsep.line.color.theme_color = MSO_THEME_COLOR.ACCENT_1
+                vsep.line.width = Pt(0.5)
+            else:
+                vsep.line.color.rgb = _hex_to_rgb("B0C4DE")
+                vsep.line.width = Pt(0.5)
+        except Exception:
+            pass
 
 
 # ── Chart rendering ─────────────────────────────────────────────────
@@ -1248,13 +1477,36 @@ def _render_process_flow(slide, pos, items, has_tpl: bool = False):
             p2.alignment = PP_ALIGN.CENTER
             p2.space_before = Pt(8)
 
-        # ── Arrow connector (clean text '→' instead of shape) ──
+        # ── Arrow connector (real connector shape + chevron indicator) ──
         if i < n - 1:
-            ax = x + item_width
-            ay = y_center + item_height // 2 - Emu(140000)
-            _add_textbox(slide, "→", ax, ay, arrow_gap, Emu(280000),
-                         font_size=Pt(22), bold=True, alignment="center",
-                         color="999999", autofit=False)
+            ax_start = x + item_width
+            ax_end = ax_start + arrow_gap
+            ay = y_center + item_height // 2
+            try:
+                conn = slide.shapes.add_connector(
+                    1, ax_start, ay, ax_end, ay
+                )
+                if has_tpl:
+                    conn.line.color.theme_color = MSO_THEME_COLOR.ACCENT_1
+                else:
+                    conn.line.color.rgb = _hex_to_rgb("4472C4")
+                conn.line.width = Pt(2)
+            except Exception:
+                pass
+            # Small chevron at midpoint of arrow
+            chev_sz = Emu(160000)
+            chev_x = ax_start + (arrow_gap - chev_sz) // 2
+            chev_y = ay - chev_sz // 2
+            chev = slide.shapes.add_shape(
+                MSO_SHAPE.CHEVRON, chev_x, chev_y, chev_sz, chev_sz
+            )
+            if has_tpl:
+                chev.fill.solid()
+                chev.fill.fore_color.theme_color = MSO_THEME_COLOR.ACCENT_1
+            else:
+                chev.fill.solid()
+                chev.fill.fore_color.rgb = _hex_to_rgb("4472C4")
+            chev.line.fill.background()
 
 
 def _render_timeline(slide, pos, items, has_tpl: bool = False):
@@ -1482,23 +1734,36 @@ def _render_kpi_cards(slide, pos, items, has_tpl: bool = False):
         _ktxt = _hex_to_rgb(pick_text_color(_kfb, large_text=True))
         _ksub = _hex_to_rgb(darken_hex(pick_text_color(_kfb), 0.08))
 
-        # Big value — prominent hero metric
+        # Big value — prominent hero metric (40pt+ for visual hierarchy)
         p = tf.paragraphs[0]
         p.text = item.value or ""
-        p.font.size = Pt(34)
+        p.font.size = Pt(42)
         p.font.name = config.FONT_NAME_MONO
         p.font.bold = True
         p.font.color.rgb = _ktxt
         p.alignment = PP_ALIGN.CENTER
         p.space_before = Pt(8)
 
-        # ── Thin separator line (text-based, lightweight) ──
+        # ── Real separator line between value and label ──
+        try:
+            sep_line = slide.shapes.add_connector(
+                1, x + Emu(200000), y + card_height // 2 + Emu(60000),
+                x + card_width - Emu(200000), y + card_height // 2 + Emu(60000)
+            )
+            if has_tpl:
+                sep_line.line.color.theme_color = MSO_THEME_COLOR.BACKGROUND_1
+            else:
+                sep_line.line.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+            sep_line.line.width = Pt(1)
+        except Exception:
+            pass
+
+        # Text-based fallback separator
         sep = tf.add_paragraph()
-        sep.text = "───"
-        sep.font.size = Pt(8)
-        sep.font.color.rgb = _ksub
+        sep.text = ""
+        sep.font.size = Pt(4)
         sep.alignment = PP_ALIGN.CENTER
-        sep.space_before = Pt(6)
+        sep.space_before = Pt(4)
 
         # Label below separator
         p2 = tf.add_paragraph()
