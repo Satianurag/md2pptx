@@ -295,7 +295,14 @@ def render_presentation(spec: PresentationSpec, output_path: str | Path) -> Path
         if n_tpl_slides >= 2:
             template_has_bookends = True
             # Capture layout index of last slide to prevent content slides from using it
-            last_slide_layout_idx = prs.slides[n_tpl_slides - 1].slide_layout.index
+            # Find the layout index manually since SlideLayout objects don't have an .index attribute
+            closing_layout = prs.slides[n_tpl_slides - 1].slide_layout
+            last_slide_layout_idx = -1
+            for idx, layout in enumerate(prs.slide_layouts):
+                if layout == closing_layout:
+                    last_slide_layout_idx = idx
+                    break
+            
             # Delete only middle slides (indices 1 to n-2), preserve first and last
             for i in range(n_tpl_slides - 2, 0, -1):
                 rId = prs.slides._sldIdLst[i].rId

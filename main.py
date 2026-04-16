@@ -197,13 +197,13 @@ def main() -> None:
     )
     parser.add_argument(
         "--input", "-i",
-        help="Path to markdown file (or directory for --batch)",
+        help="Path to markdown file to convert.",
         required=True,
     )
     parser.add_argument(
         "--template", "-t",
-        help="Path to .pptx template (auto-detected if omitted)",
-        default="",
+        help="Path to a .pptx template file. Required.",
+        required=True,
     )
     parser.add_argument(
         "--output", "-o",
@@ -214,13 +214,9 @@ def main() -> None:
         "--slides", "-s",
         type=int,
         default=15,
-        help="Target slide count (10-15, default: 15). Use 0 for auto-detection based on content.",
+        help="Number of slides to generate (10–15, default: 15).",
     )
-    parser.add_argument(
-        "--batch", "-b",
-        action="store_true",
-        help="Process all .md files in the input directory",
-    )
+
     parser.add_argument(
         "--verbose", "-v",
         action="store_true",
@@ -231,18 +227,18 @@ def main() -> None:
 
     setup_logging(args.verbose)
 
-    # Clamp slide count (0 = auto mode for batch)
-    if args.slides != 0:
-        args.slides = max(config.MIN_SLIDES, min(config.MAX_SLIDES, args.slides))
+    # Validate slide count
+    if not (config.MIN_SLIDES <= args.slides <= config.MAX_SLIDES):
+        parser.error(
+            f"--slides must be between {config.MIN_SLIDES} and {config.MAX_SLIDES} "
+            f"(got {args.slides}). Default is {config.DEFAULT_SLIDE_COUNT}."
+        )
 
     # Ensure output directory exists
     config.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    if args.batch:
-        process_batch(args.input, args.template, args.slides)
-    else:
-        ok = process_single(args.input, args.template, args.output, args.slides)
-        sys.exit(0 if ok else 1)
+    ok = process_single(args.input, args.template, args.output, args.slides)
+    sys.exit(0 if ok else 1)
 
 
 if __name__ == "__main__":

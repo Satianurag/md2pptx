@@ -1,0 +1,49 @@
+╭───────────────────────────────── Processing ─────────────────────────────────╮
+│ Banking ROE Competitive Benchmarking Analysis.md                             │
+│ Size: 0.06 MB | Target slides: 15                                            │
+╰──────────────────────────────────────────────────────────────────────────────╯
+INFO     Node: parse_markdown                                                   
+INFO     Content size OK: 45325 chars — no chunking needed                      
+INFO     Parsed: title='Banking ROE Competitive Benchmarking Analysis',         
+         sections=14, tables=4, metrics=117                                     
+INFO     Node: analyze_template                                                 
+INFO     Node: profile_content                                                  
+INFO     Content profile: archetype=financial (scores={'financial': 81.6,       
+         'market_analysis': 76.9, 'narrative_tech': 44.5, 'process_methodology':
+         50.2, 'comparative': 77.4})                                            
+INFO     Profile: archetype=financial, data_richness=high, vis_ratio=0.7,       
+         charts=['line', 'bar', 'column'], infographics=['process_flow',        
+         'timeline', 'comparison', 'kpi_cards']                                 
+INFO     Theme accents: ['EF4444', 'E97132', '196B24', '0F9ED5', 'A02B93',      
+         '4EA72E']                                                              
+INFO     Template loaded: 6 layouts                                             
+INFO     Node: plan_slides                                                      
+INFO     Planning slides: target=15, sections=14, prompt_chars=49242            
+INFO     LLM initialized: model=gemini-3.1-flash-lite-preview                   
+INFO     AFC is enabled with max remote calls: 10.                              
+INFO     Slide plan generated: 12 slides                                        
+INFO     Plan: 12 slides, storyline: This presentation benchmarks the capital   
+         efficiency of Bank ABC, FAB, and GIB fr...                             
+INFO     Node: write_content                                                    
+INFO     Writing content for 12 slides                                          
+INFO     Content writer prompt: 30839 chars                                     
+INFO     AFC is enabled with max remote calls: 10.                              
+INFO     Content written: 12 slides generated                                   
+INFO     Content written: 12 slides                                             
+INFO     Node: generate_spec                                                    
+INFO     Grid: 12192000x6858000, content_w=11277600, content_h=5260350          
+INFO     Added dedicated chart slide for deck-level visual coverage             
+INFO     Spec generated: 12 slides                                              
+INFO     Node: validate                                                         
+INFO     Validation passed. 0 warnings, 0 fixes applied                         
+INFO     Node: render                                                           
+INFO     Template loaded with 6 slides - preserved first and last as bookends   
+INFO     Slide dimensions: 12192000x6858000 EMU (13.33x7.50 in)                 
+INFO     Theme accents: ['EF4444', 'E97132', '196B24', '0F9ED5', 'A02B93',      
+         '4EA72E']                                                              
+INFO     Rendered: /home/sati/Documents/project/md2pptx/output/Banking ROE      
+         Competitive Benchmarking Analysis.pptx                                 
+⠏ Done
+Success (34.4s)
+  Output: /home/sati/Documents/project/md2pptx/output/Banking ROE Competitive 
+Benchmarking Analysis.pptx

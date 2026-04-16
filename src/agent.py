@@ -85,21 +85,21 @@ def profile_content_node(state: PipelineState) -> dict:
 
 
 def analyze_template_node(state: PipelineState) -> dict:
-    """Read template and extract layout metadata."""
+    """Read template and extract layout metadata. Fails fast if no template is provided."""
     logger.info("Node: analyze_template")
 
     template_path = state.get("template_path", "")
-    md_path = state.get("md_path", "")
 
-    # Auto-detect template if not provided
-    if not template_path and md_path:
-        detected = auto_detect_template(md_path)
-        if detected:
-            template_path = str(detected)
-            logger.info(f"Auto-detected template: {detected.name}")
+    if not template_path:
+        return {
+            "errors": state.get("errors", []) + [
+                "No template provided. --template/-t is required."
+            ]
+        }
+
 
     master_info = None
-    if template_path and Path(template_path).exists():
+    if Path(template_path).exists():
         try:
             master_info = read_slide_master(template_path)
             logger.info(f"Template loaded: {len(master_info.layouts)} layouts")
@@ -107,9 +107,12 @@ def analyze_template_node(state: PipelineState) -> dict:
             logger.warning(f"Failed to read template: {e}")
             template_path = ""
     else:
-        if template_path:
-            logger.warning(f"Template not found: {template_path}")
-        template_path = ""
+        logger.warning(f"Template not found: {template_path}")
+        return {
+            "errors": state.get("errors", []) + [
+                f"Template file not found: {template_path}"
+            ]
+        }
 
     return {"template_path": template_path, "master_info": master_info}
 
