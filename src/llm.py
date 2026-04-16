@@ -15,21 +15,6 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-
-def _extract_text(content) -> str:
-    """Extract plain text from LLM response content (may be str or list of dicts)."""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts = []
-        for item in content:
-            if isinstance(item, dict) and "text" in item:
-                parts.append(item["text"])
-            elif isinstance(item, str):
-                parts.append(item)
-        return "\n".join(parts)
-    return str(content)
-
 T = TypeVar("T", bound=BaseModel)
 
 # ── Rate limit constants ──
