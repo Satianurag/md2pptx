@@ -31,6 +31,11 @@ def _find_hackathon_dir(subfolder: str) -> Path | None:
 
 
 def find_templates_dir() -> Path | None:
+    # Use local templates directory instead of hackathon folder
+    local_templates = PROJECT_ROOT / "templates"
+    if local_templates.exists() and local_templates.is_dir():
+        return local_templates
+    # Fallback to hackathon folder search
     return _find_hackathon_dir("Slide Master")
 
 

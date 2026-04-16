@@ -287,30 +287,30 @@ def render_presentation(spec: PresentationSpec, output_path: str | Path) -> Path
     last_slide_layout_idx = None
 
     if template_path and Path(template_path).exists():
+        # Load template to get theme colors/layouts
         prs = Presentation(str(template_path))
         n_tpl_slides = len(prs.slides)
-
-        # Bookend mode: keep template's first (cover) and last (thank you) slides
-        # intact.  Delete only the middle example slides.
+        
+        # Enable bookend system if template has ≥2 slides (preserve first and last)
         if n_tpl_slides >= 2:
-            last_slide_layout_idx = list(prs.slide_layouts).index(
-                prs.slides[-1].slide_layout
-            )
-            # Delete middle slides (indices 1..N-2), iterate in reverse
+            template_has_bookends = True
+            # Capture layout index of last slide to prevent content slides from using it
+            last_slide_layout_idx = prs.slides[n_tpl_slides - 1].slide_layout.index
+            # Delete only middle slides (indices 1 to n-2), preserve first and last
             for i in range(n_tpl_slides - 2, 0, -1):
                 rId = prs.slides._sldIdLst[i].rId
                 prs.part.drop_rel(rId)
                 prs.slides._sldIdLst.remove(prs.slides._sldIdLst[i])
-            template_has_bookends = True
-            _log.info(f"Template bookends: kept slide 1 (cover) and slide {n_tpl_slides} (closing), removed {n_tpl_slides - 2} middle slides")
-        elif n_tpl_slides == 1:
-            # Only one slide — keep it as cover, no closing bookend
-            last_slide_layout_idx = None
-            template_has_bookends = False
-            _log.info("Template has only 1 slide — using as cover only")
+            _log.info(f"Template loaded with {n_tpl_slides} slides - preserved first and last as bookends")
         else:
-            last_slide_layout_idx = None
+            # Template has <2 slides, delete all and don't use bookend system
             template_has_bookends = False
+            last_slide_layout_idx = None
+            for i in range(n_tpl_slides - 1, -1, -1):
+                rId = prs.slides._sldIdLst[i].rId
+                prs.part.drop_rel(rId)
+                prs.slides._sldIdLst.remove(prs.slides._sldIdLst[i])
+            _log.info(f"Template loaded with {n_tpl_slides} slides - deleted all (insufficient for bookends)")
     else:
         prs = Presentation()
         prs.slide_width = config.SLIDE_WIDTH
