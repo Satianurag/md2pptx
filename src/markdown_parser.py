@@ -108,6 +108,13 @@ def parse_markdown(md_text: str) -> ContentTree:
             if target:
                 target.text += ("\n" if target.text else "") + text
 
+        # ── Code blocks ──
+        elif tok_type == 'block_code':
+            code_text = token.get('text', '')
+            target = current_h3 or current_h2 or current_h1
+            if target:
+                target.code_blocks.append(code_text)
+
     # If subtitle wasn't found, try to get it from first paragraph-like content after title
     if not subtitle and sections:
         first = sections[0]

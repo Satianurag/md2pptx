@@ -1,6 +1,5 @@
 from __future__ import annotations
 import logging
-import json
 import math
 import re
 from typing import Optional
@@ -9,14 +8,53 @@ from .schemas import (
     SlideMasterInfo, PresentationSpec, SlideSpec, SlideElement,
     Position, TextContent, BulletContent, ChartContent, ChartSeries,
     TableContent, ShapeContent, InfographicContent, InfographicItem,
-    DataTable, KeyMetric,
+    DataTable, KeyMetric, DeckContent, SlideContent,
 )
 from .content_profiler import ContentProfile
-from .llm import invoke_llm
 from .grid_system import Grid
 from . import config
 
 logger = logging.getLogger(__name__)
+
+
+# Code detection patterns for JetBrains Mono font application
+_CODE_PATTERNS = [
+    re.compile(r'^\s*[\w\-]+:\s*\S+', re.MULTILINE),  # YAML-like key: value
+    re.compile(r'[{\[\]}]'),  # JSON brackets
+    re.compile(r'(function|class|def|const|let|var)\s+'),  # Code keywords
+    re.compile(r'[;{}]\s*$', re.MULTILINE),  # Statement endings
+    re.compile(r'\`[^`]+\`'),  # Inline code backticks
+]
+
+
+def _is_code_content(text: str) -> bool:
+    """Detect if text appears to be code/technical content for monospace font."""
+    if not text:
+        return False
+    code_indicators = sum(1 for p in _CODE_PATTERNS if p.search(text))
+    return code_indicators >= 2 or text.count('`') >= 2
+
+
+def _create_text_content(
+    text: str,
+    font_size: int | None = None,
+    bold: bool = False,
+    italic: bool = False,
+    color: str | None = None,
+    alignment: str | None = None,
+) -> TextContent:
+    """Create TextContent with appropriate font based on content type."""
+    is_code = _is_code_content(text)
+    return TextContent(
+        text=text,
+        font_size=font_size,
+        font_name=config.FONT_NAME_MONO if is_code else config.FONT_NAME_PRIMARY,
+        bold=bold,
+        italic=italic,
+        color=color,
+        alignment=alignment,
+        is_code=is_code,
+    )
 
 
 def _smart_truncate(text: str, max_chars: int = 200) -> str:
@@ -55,56 +93,34 @@ def _smart_truncate(text: str, max_chars: int = 200) -> str:
 _grid: Grid = Grid.default()
 
 
-SPEC_SYSTEM_PROMPT = """\
-You are a presentation content specialist. Given a slide plan item and the relevant source \
-content from a research report, generate the EXACT text content for that slide.
-
-RULES:
-1. Be CONCISE. Max 6 bullet points per slide. Max 100 chars per bullet.
-2. Extract the KEY insight — don't copy paragraphs verbatim.
-3. For charts: extract actual numeric data (categories + series with float values).
-4. For tables: extract headers and row data accurately.
-5. For infographics: create 3-6 items with short title + description.
-6. For KPI cards: extract 3-5 key metrics with label + value.
-7. Never invent data — only use what's in the source content.
-8. Write in professional business language.
-
-Respond with a JSON object with these fields:
-- "title": slide title (string)
-- "subtitle": optional subtitle (string or null)
-- "content_type": one of "bullets", "chart", "table", "infographic", "kpi", "text", "mixed"
-- "bullets": list of strings (if bullets)
-- "chart_type": one of "bar","column","line","pie","area","doughnut" (if chart)
-- "chart_title": string (if chart)
-- "categories": list of strings (if chart)
-- "series": list of {"name": str, "values": list of floats} (if chart)
-- "table_headers": list of strings (if table)
-- "table_rows": list of list of strings (if table)
-- "infographic_type": one of "process_flow","timeline","comparison","kpi_cards","hierarchy" (if infographic)
-- "infographic_items": list of {"title": str, "description": str, "value": str or null} (if infographic)
-- "text": plain text content (if text type)
-"""
-
-
 def generate_presentation_spec(
     content_tree: ContentTree,
     slide_plan: SlidePlan,
     master_info: SlideMasterInfo | None = None,
     template_path: str = "",
     content_profile: ContentProfile | None = None,
+    deck_content: DeckContent | None = None,
 ) -> PresentationSpec:
-    """Convert a SlidePlan + ContentTree into a full PresentationSpec."""
+    """Convert a SlidePlan + ContentTree + AI-written DeckContent into a full PresentationSpec."""
     global _grid
     _grid = Grid.from_template(master_info) if master_info else Grid.default()
     logger.info(f"Grid: {_grid.slide_w}x{_grid.slide_h}, content_w={_grid.content_w}, content_h={_grid.content_h}")
 
+    # Build slide_number → SlideContent lookup
+    content_map: dict[int, SlideContent] = {}
+    if deck_content:
+        for sc in deck_content.slides:
+            content_map[sc.slide_number] = sc
+
     slides: list[SlideSpec] = []
 
     for plan_item in slide_plan.slides:
-        slide_spec = _generate_slide_spec(content_tree, plan_item, slide_plan)
+        slide_content = content_map.get(plan_item.slide_number)
+        slide_spec = _generate_slide_spec(content_tree, plan_item, slide_plan, slide_content)
+        slide_spec.importance_score = plan_item.importance_score
         slides.append(slide_spec)
 
-    _ensure_visual_coverage(slides, content_tree, content_profile)
+    _ensure_visual_coverage(slides, content_tree, content_profile, slide_plan.target_slide_count)
 
     return PresentationSpec(
         title=content_tree.title,
@@ -119,10 +135,12 @@ def _ensure_visual_coverage(
     slides: list[SlideSpec],
     tree: ContentTree,
     profile: ContentProfile | None = None,
+    target_count: int = 15,
 ) -> None:
     """Ensure the deck contains dedicated visual slides without cluttering existing ones.
 
     When a *profile* is available, use its ranked tables/metrics for smarter selection.
+    Respects *target_count* so we don't bloat the deck beyond what the user asked for.
     """
     # Build ordered table list (profile-ranked first, then fallback)
     ordered_tables: list[DataTable] = []
@@ -144,6 +162,7 @@ def _ensure_visual_coverage(
                 if _insert_support_slide(
                     slides,
                     _build_support_chart_slide(table, categories, series),
+                    target_count,
                 ):
                     logger.info("Added dedicated chart slide for deck-level visual coverage")
                 break
@@ -156,7 +175,7 @@ def _ensure_visual_coverage(
                     best_table = table
                     if _should_render_as_table(table):
                         break
-        if best_table and _insert_support_slide(slides, _build_support_table_slide(best_table)):
+        if best_table and _insert_support_slide(slides, _build_support_table_slide(best_table), target_count):
             logger.info("Added dedicated table slide for deck-level visual coverage")
 
     _renumber_slides(slides)
@@ -166,13 +185,14 @@ def _deck_has_element(slides: list[SlideSpec], element_type: str) -> bool:
     return any(el.element_type == element_type for slide in slides for el in slide.elements)
 
 
-def _insert_support_slide(slides: list[SlideSpec], support_slide: SlideSpec) -> bool:
+def _insert_support_slide(slides: list[SlideSpec], support_slide: SlideSpec, target_count: int = 15) -> bool:
     """Insert a new support slide before closing slides, or replace a low-value content slide."""
+    max_allowed = min(target_count, config.MAX_SLIDES)
     insert_at = next(
         (idx for idx, slide in enumerate(slides) if slide.slide_type in ("conclusion", "thank_you")),
         len(slides),
     )
-    if len(slides) < config.MAX_SLIDES:
+    if len(slides) < max_allowed:
         slides.insert(insert_at, support_slide)
         return True
 
@@ -235,69 +255,101 @@ def _build_support_table_slide(table: DataTable) -> SlideSpec:
     )
 
 
+def _resolve_title(plan_item: SlidePlanItem) -> str:
+    """Pick the best title: action_title > title."""
+    return plan_item.action_title or plan_item.title
+
+
 def _generate_slide_spec(
     content_tree: ContentTree,
     plan_item: SlidePlanItem,
     slide_plan: SlidePlan | None = None,
+    slide_content: SlideContent | None = None,
 ) -> SlideSpec:
-    """Generate a single SlideSpec from a SlidePlanItem."""
+    """Generate a single SlideSpec from a SlidePlanItem, using AI-written SlideContent."""
 
-    # Special slides that don't need LLM
+    # Use AI-written title when available
+    title = (slide_content.title if slide_content and slide_content.title
+             else plan_item.action_title or plan_item.title)
+
     if plan_item.slide_type == "cover":
-        return _build_cover_slide(content_tree, plan_item)
+        return _build_cover_slide(content_tree, plan_item, slide_content)
 
     if plan_item.slide_type == "thank_you":
-        return _build_thank_you_slide(plan_item)
+        return _build_thank_you_slide(plan_item, slide_content)
 
     if plan_item.slide_type == "section_divider":
-        return _build_divider_slide(plan_item)
+        return _build_divider_slide(plan_item, slide_content)
 
     # For content slides, gather relevant source content
     source_sections = _find_source_sections(content_tree, plan_item.content_source)
-    source_text = _sections_to_text(source_sections, content_tree)
 
-    # Try rule-based generation first for simple cases
-    rule_based = _try_rule_based_generation(plan_item, source_sections, content_tree, slide_plan)
-    if rule_based:
-        return rule_based
+    # Route to the appropriate builder based on visualization_hint
+    if plan_item.slide_type == "agenda":
+        return _build_agenda_slide(plan_item, content_tree, slide_content)
 
-    # Fall back to LLM for complex content decisions
-    return _llm_generate_slide(plan_item, source_text)
+    if plan_item.slide_type == "executive_summary":
+        return _build_exec_summary_slide(plan_item, content_tree, slide_content)
+
+    if plan_item.slide_type == "conclusion":
+        return _build_conclusion_slide(plan_item, source_sections, content_tree, slide_plan, slide_content)
+
+    if plan_item.visualization_hint == "chart" and source_sections:
+        return _build_chart_slide(plan_item, source_sections, slide_content)
+
+    if plan_item.visualization_hint == "table" and source_sections:
+        return _build_table_slide(plan_item, source_sections, slide_content)
+
+    if plan_item.visualization_hint == "kpi" and source_sections:
+        return _build_kpi_slide(plan_item, source_sections, content_tree, slide_content)
+
+    if plan_item.visualization_hint == "infographic" and source_sections:
+        return _build_infographic_slide(plan_item, source_sections, slide_content)
+
+    if plan_item.visualization_hint == "mixed" and source_sections:
+        return _build_mixed_slide(plan_item, source_sections, content_tree, slide_content)
+
+    # Default: bullets slide
+    return _build_bullets_slide(plan_item, source_sections, slide_content)
 
 
-def _build_cover_slide(tree: ContentTree, plan: SlidePlanItem) -> SlideSpec:
+def _build_cover_slide(tree: ContentTree, plan: SlidePlanItem, sc: SlideContent | None = None) -> SlideSpec:
+    title = sc.title if sc and sc.title else (tree.title or plan.title)
+    subtitle = sc.subtitle if sc and sc.subtitle else (tree.subtitle or plan.subtitle or "")
     return SlideSpec(
         slide_number=plan.slide_number,
         slide_type="cover",
         layout_name="cover",
-        title=tree.title or plan.title,
-        subtitle=tree.subtitle or plan.subtitle or "",
+        title=title,
+        subtitle=subtitle,
         elements=[],
     )
 
 
-def _build_thank_you_slide(plan: SlidePlanItem) -> SlideSpec:
+def _build_thank_you_slide(plan: SlidePlanItem, sc: SlideContent | None = None) -> SlideSpec:
+    title = sc.title if sc and sc.title else (plan.title or "Thank You")
+    subtitle = sc.subtitle if sc and sc.subtitle else (plan.subtitle or "Questions & Discussion")
     return SlideSpec(
         slide_number=plan.slide_number,
         slide_type="thank_you",
         layout_name="thank_you",
-        title=plan.title or "Thank You",
-        subtitle=plan.subtitle or "Questions & Discussion",
+        title=title,
+        subtitle=subtitle,
         elements=[],
     )
 
 
-def _build_divider_slide(plan: SlidePlanItem) -> SlideSpec:
-    subtitle = plan.subtitle or plan.key_message or ""
+def _build_divider_slide(plan: SlidePlanItem, sc: SlideContent | None = None) -> SlideSpec:
+    key_msg = sc.key_takeaway if sc and sc.key_takeaway else (plan.key_message or "")
+    subtitle = sc.subtitle if sc and sc.subtitle else (plan.subtitle or key_msg)
     elements = []
 
-    # Add key message as a text element so dividers aren't empty
-    if plan.key_message and plan.key_message.strip():
+    if key_msg.strip():
         elements.append(SlideElement(
             element_type="text",
             position=_grid.full(),
-            content=TextContent(
-                text=_smart_truncate(plan.key_message, 200),
+            content=_create_text_content(
+                text=key_msg,
                 font_size=14,
                 italic=True,
             ),
@@ -307,7 +359,7 @@ def _build_divider_slide(plan: SlidePlanItem) -> SlideSpec:
         slide_number=plan.slide_number,
         slide_type="section_divider",
         layout_name="divider",
-        title=plan.title,
+        title=sc.title if sc and sc.title else plan.title,
         subtitle=subtitle,
         elements=elements,
     )
@@ -366,34 +418,6 @@ def _find_source_sections(
         search_partial(tree.sections)
 
     return found
-
-
-def _sections_to_text(sections: list[ContentSection], tree: ContentTree) -> str:
-    """Convert sections to a text block for the LLM."""
-    parts = []
-    for sec in sections:
-        parts.append(f"## {sec.heading}")
-        if sec.text:
-            parts.append(sec.text[:500])
-        for b in sec.bullets[:8]:
-            parts.append(f"- {b[:150]}")
-        for t in sec.tables[:2]:
-            parts.append(f"Table: {', '.join(t.headers[:6])}")
-            for row in t.rows[:5]:
-                parts.append(f"  | {' | '.join(str(c)[:30] for c in row[:6])} |")
-        for m in sec.metrics[:5]:
-            parts.append(f"Metric: {m.label} = {m.value}")
-        for sub in sec.subsections:
-            parts.append(f"### {sub.heading}")
-            if sub.text:
-                parts.append(sub.text[:300])
-            for b in sub.bullets[:5]:
-                parts.append(f"- {b[:120]}")
-
-    result = "\n".join(parts)
-    if len(result) > 4000:
-        result = result[:4000] + "\n...[truncated]"
-    return result
 
 
 def _parse_number(s: str) -> float:
@@ -476,179 +500,20 @@ def _should_render_as_table(table: DataTable) -> bool:
     return False
 
 
-_PROCESS_KEYWORDS = re.compile(
-    r'\b(step|stage|phase|process|pipeline|workflow|procedure|method|approach|strategy)\b', re.I
-)
-_TIMELINE_KEYWORDS = re.compile(
-    r'\b(20\d{2}|19\d{2}|year|quarter|Q[1-4]|month|before|after|first|then|finally|timeline)\b', re.I
-)
-_COMPARISON_KEYWORDS = re.compile(
-    r'\b(vs\.?|versus|compared|comparison|advantage|disadvantage|pro|con|differ|alternative)\b', re.I
-)
+## _try_rule_based_generation and _detect_infographic_pattern removed — AI content writer handles all content decisions
 
 
-def _detect_infographic_pattern(sections: list[ContentSection]) -> tuple[str | None, str | None]:
-    """Detect if content can be visualized as an infographic. Returns (infographic_type, None) or (None, None)."""
-    all_bullets: list[str] = []
-    all_text = ""
-    has_metrics = False
-    for sec in sections:
-        all_bullets.extend(sec.bullets)
-        all_text += sec.text + " "
-        if sec.metrics:
-            has_metrics = True
-        for sub in sec.subsections:
-            all_bullets.extend(sub.bullets)
-            all_text += sub.text + " "
-            if sub.metrics:
-                has_metrics = True
-
-    n = len(all_bullets)
-    combined = " ".join(all_bullets) + " " + all_text
-
-    # KPI cards: section has 3-6 metrics
-    if has_metrics:
-        metric_count = sum(len(s.metrics) for s in sections) + sum(
-            len(sub.metrics) for s in sections for sub in s.subsections
-        )
-        if 2 <= metric_count <= 6:
-            return "kpi_cards", None
-
-    # Process flow: bullets with step-like patterns or numbered items
-    numbered_count = sum(1 for b in all_bullets if re.match(r'^\d+[\.\)]\s', b))
-    if numbered_count >= 3 or (n >= 3 and _PROCESS_KEYWORDS.search(combined)):
-        return "process_flow", None
-
-    # Timeline: chronological patterns
-    if n >= 3 and _TIMELINE_KEYWORDS.search(combined):
-        return "timeline", None
-
-    # Comparison: comparative language
-    if 2 <= n <= 6 and _COMPARISON_KEYWORDS.search(combined):
-        return "comparison", None
-
-    # Bullets with colons (key: value) → comparison or KPI
-    colon_count = sum(1 for b in all_bullets if ":" in b and len(b.split(":")[0]) < 30)
-    if colon_count >= 3:
-        return "comparison", None
-
-    return None, None
-
-
-def _try_rule_based_generation(
-    plan_item: SlidePlanItem,
-    source_sections: list[ContentSection],
-    tree: ContentTree,
-    slide_plan: SlidePlan | None = None,
-) -> SlideSpec | None:
-    """Try to generate a slide without LLM for straightforward cases."""
-
-    # Agenda slide
-    if plan_item.slide_type == "agenda":
-        return _build_agenda_slide(plan_item, tree)
-
-    # Executive summary
-    if plan_item.slide_type == "executive_summary":
-        return _build_exec_summary_slide(plan_item, tree)
-
-    # Conclusion slides should preserve their dedicated takeaways pattern and
-    # should not be auto-converted into KPI/infographic/chart layouts.
-    if plan_item.slide_type == "conclusion":
-        return _build_conclusion_slide(plan_item, source_sections, tree, slide_plan)
-
-    # Chart slides with table data
-    if plan_item.visualization_hint == "chart" and source_sections:
-        chart_slide = _build_chart_slide(plan_item, source_sections)
-        if chart_slide:
-            return chart_slide
-
-    # Table slides
-    if plan_item.visualization_hint == "table" and source_sections:
-        table_slide = _build_table_slide(plan_item, source_sections)
-        if table_slide:
-            return table_slide
-
-    # KPI / metric cards
-    if plan_item.visualization_hint == "kpi" and source_sections:
-        kpi_slide = _build_kpi_slide(plan_item, source_sections, tree)
-        if kpi_slide:
-            return kpi_slide
-
-    # Infographic slides
-    if plan_item.visualization_hint == "infographic" and source_sections:
-        infographic_slide = _build_infographic_slide(plan_item, source_sections)
-        if infographic_slide:
-            return infographic_slide
-
-    # Mixed slides: chart/infographic on left, bullets on right
-    if plan_item.visualization_hint == "mixed" and source_sections:
-        mixed_slide = _build_mixed_slide(plan_item, source_sections, tree)
-        if mixed_slide:
-            return mixed_slide
-
-    # INFOGRAPHIC-FIRST: before falling back to bullets, detect visual patterns
-    if plan_item.visualization_hint == "bullets" and source_sections:
-        inf_type, _ = _detect_infographic_pattern(source_sections)
-        if inf_type == "kpi_cards":
-            kpi = _build_kpi_slide(plan_item, source_sections, tree)
-            if kpi:
-                return kpi
-        elif inf_type:
-            # Override the plan item's hint and build infographic
-            logger.info(f"Infographic-first: converting slide {plan_item.slide_number} "
-                        f"from bullets to {inf_type}")
-            inf_slide = _build_infographic_slide_with_type(
-                plan_item, source_sections, inf_type
-            )
-            if inf_slide:
-                return inf_slide
-
-    # CHART-FIRST / TABLE-FIRST: if bullets slide has table data, decide
-    if plan_item.visualization_hint == "bullets" and source_sections:
-        _tables_found = [
-            t for sec in source_sections for t in sec.tables if t.rows and t.headers
-        ] + [
-            t for sec in source_sections for sub in sec.subsections
-            for t in sub.tables if t.rows and t.headers
-        ]
-        if _tables_found:
-            # Check if the first table is better as a table
-            if _should_render_as_table(_tables_found[0]):
-                tbl_slide = _build_table_slide(plan_item, source_sections)
-                if tbl_slide:
-                    logger.info(f"Table-first: slide {plan_item.slide_number} auto-upgraded to table")
-                    return tbl_slide
-            # Otherwise try chart/mixed
-            mixed = _build_mixed_slide(plan_item, source_sections, tree)
-            if mixed:
-                logger.info(f"Chart-first: slide {plan_item.slide_number} auto-upgraded to mixed")
-                return mixed
-            chart = _build_chart_slide(plan_item, source_sections)
-            if chart:
-                logger.info(f"Chart-first: slide {plan_item.slide_number} auto-upgraded to chart")
-                return chart
-
-    # Plain bullet slides (last resort)
-    if plan_item.visualization_hint == "bullets" and source_sections:
-        return _build_bullets_slide(plan_item, source_sections)
-
-    # Content slides with table data → try chart
-    if plan_item.slide_type == "content" and source_sections:
-        chart = _build_chart_slide(plan_item, source_sections)
-        if chart:
-            return chart
-        return _build_bullets_slide(plan_item, source_sections)
-
-    return None
-
-
-def _build_agenda_slide(plan: SlidePlanItem, tree: ContentTree) -> SlideSpec:
-    """Build agenda from section headings."""
-    items = []
-    for sec in tree.sections[:10]:
-        heading = sec.heading.strip()
-        if heading.lower() not in ("executive summary", "table of contents", "references", "references and source documentation"):
-            items.append(heading)
+def _build_agenda_slide(plan: SlidePlanItem, tree: ContentTree, sc: SlideContent | None = None) -> SlideSpec:
+    """Build agenda slide using AI-written content."""
+    # AI-written bullets preferred
+    if sc and sc.bullets:
+        items = sc.bullets
+    else:
+        items = []
+        for sec in tree.sections[:10]:
+            heading = sec.heading.strip()
+            if heading.lower() not in ("executive summary", "table of contents", "references", "references and source documentation"):
+                items.append(heading)
 
     elements = []
     if items:
@@ -662,69 +527,69 @@ def _build_agenda_slide(plan: SlidePlanItem, tree: ContentTree) -> SlideSpec:
         slide_number=plan.slide_number,
         slide_type="agenda",
         layout_name=config.LAYOUT_TITLE_ONLY,
-        title=plan.title or "Agenda",
+        title=sc.title if sc and sc.title else (plan.title or "Agenda"),
         elements=elements,
     )
 
 
-def _build_exec_summary_slide(plan: SlidePlanItem, tree: ContentTree) -> SlideSpec:
-    """Build executive summary slide."""
-    summary = tree.executive_summary or ""
+def _build_exec_summary_slide(plan: SlidePlanItem, tree: ContentTree, sc: SlideContent | None = None) -> SlideSpec:
+    """Build executive summary slide using AI-written content."""
     elements = []
 
-    if summary:
-        # Break into bullets at sentence boundaries
+    # AI-written bullets preferred
+    if sc and sc.bullets:
+        key_points = sc.bullets
+    else:
+        summary = tree.executive_summary or ""
         sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', summary) if s.strip()]
-        # Take top 5 key sentences
         key_points = sentences[:5]
-        if key_points:
-            # Truncate each point
-            key_points = [_smart_truncate(p, config.MAX_CHARS_PER_BULLET) for p in key_points]
-            elements.append(SlideElement(
-                element_type="bullets",
-                position=_grid.full(),
-                content=BulletContent(items=key_points, font_size=13),
-            ))
+
+    if key_points:
+        elements.append(SlideElement(
+            element_type="bullets",
+            position=_grid.full(),
+            content=BulletContent(items=key_points[:6], font_size=13),
+        ))
 
     return SlideSpec(
         slide_number=plan.slide_number,
         slide_type="executive_summary",
         layout_name=config.LAYOUT_TITLE_ONLY,
-        title=plan.title or "Executive Summary",
+        title=sc.title if sc and sc.title else (plan.title or "Executive Summary"),
         elements=elements,
     )
 
 
-def _build_bullets_slide(plan: SlidePlanItem, sections: list[ContentSection]) -> SlideSpec:
-    """Build a bullet list slide from section content."""
-    bullets = []
-    for sec in sections:
-        # Prefer existing bullets
-        if sec.bullets:
-            bullets.extend(sec.bullets)
-        elif sec.text:
-            # Split text into sentences
-            sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', sec.text) if s.strip()]
-            bullets.extend(sentences)
-        # Also get subsection bullets
-        for sub in sec.subsections:
-            if sub.bullets:
-                bullets.extend(sub.bullets)
+def _build_bullets_slide(plan: SlidePlanItem, sections: list[ContentSection], sc: SlideContent | None = None) -> SlideSpec:
+    """Build a bullet list slide using AI-written content."""
+    # AI-written bullets preferred
+    if sc and sc.bullets:
+        bullets = sc.bullets
+    else:
+        bullets = []
+        for sec in sections:
+            if sec.bullets:
+                bullets.extend(sec.bullets)
+            elif sec.text:
+                sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', sec.text) if s.strip()]
+                bullets.extend(sentences)
+            for sub in sec.subsections:
+                if sub.bullets:
+                    bullets.extend(sub.bullets)
 
-    # Truncate
-    bullets = [_smart_truncate(b, config.MAX_CHARS_PER_BULLET) for b in bullets[:config.MAX_BULLETS_PER_SLIDE]]
+    bullets = bullets[:config.MAX_BULLETS_PER_SLIDE]
 
     elements = []
+    title = sc.title if sc and sc.title else (plan.action_title or plan.title)
+    key_msg = sc.key_takeaway if sc and sc.key_takeaway else (plan.key_message.strip() if plan.key_message else "")
 
-    # Layout variety: use sidebar_main when a key_message exists
-    key_msg = plan.key_message.strip() if plan.key_message else ""
     if key_msg and bullets and len(bullets) >= 3:
         pos_side, pos_main = _grid.sidebar_main()
         elements.append(SlideElement(
             element_type="text",
             position=pos_side,
-            content=TextContent(
-                text=_smart_truncate(key_msg, 180),
+            content=_create_text_content(
+                text=key_msg,
                 font_size=13,
                 italic=True,
             ),
@@ -745,8 +610,8 @@ def _build_bullets_slide(plan: SlidePlanItem, sections: list[ContentSection]) ->
         slide_number=plan.slide_number,
         slide_type=plan.slide_type,
         layout_name=config.LAYOUT_TITLE_ONLY,
-        title=plan.title,
-        subtitle=plan.subtitle,
+        title=title,
+        subtitle=sc.subtitle if sc and sc.subtitle else plan.subtitle,
         elements=elements,
     )
 
@@ -787,9 +652,8 @@ def _extract_chart_series(table: DataTable, chart_type: str) -> list[ChartSeries
     return series_list
 
 
-def _build_chart_slide(plan: SlidePlanItem, sections: list[ContentSection]) -> SlideSpec | None:
-    """Build a chart slide from table data in sections."""
-    # Find the first table with numeric data
+def _build_chart_slide(plan: SlidePlanItem, sections: list[ContentSection], sc: SlideContent | None = None) -> SlideSpec:
+    """Build a chart slide from table data, using AI-written insight as chart title."""
     table = None
     for sec in sections:
         for t in sec.tables:
@@ -807,13 +671,18 @@ def _build_chart_slide(plan: SlidePlanItem, sections: list[ContentSection]) -> S
                 break
 
     if not table:
-        return None
+        # No table data — build as bullets slide instead
+        return _build_bullets_slide(plan, sections, sc)
 
     chart_type = plan.chart_type_hint or _auto_detect_chart_type(table)
     categories, series_list = _extract_chart_data(table)
 
     if not categories or not series_list:
-        return None
+        return _build_bullets_slide(plan, sections, sc)
+
+    # Use AI-written chart insight as the chart title
+    chart_title = sc.chart_insight if sc and sc.chart_insight else (table.title or plan.title)
+    title = sc.title if sc and sc.title else (plan.action_title or plan.title)
 
     elements = [
         SlideElement(
@@ -821,7 +690,7 @@ def _build_chart_slide(plan: SlidePlanItem, sections: list[ContentSection]) -> S
             position=_grid.chart(),
             content=ChartContent(
                 chart_type=chart_type,
-                title=table.title or plan.title,
+                title=chart_title,
                 categories=categories,
                 series=series_list,
             ),
@@ -832,8 +701,8 @@ def _build_chart_slide(plan: SlidePlanItem, sections: list[ContentSection]) -> S
         slide_number=plan.slide_number,
         slide_type="chart",
         layout_name=config.LAYOUT_TITLE_ONLY,
-        title=plan.title,
-        subtitle=plan.subtitle,
+        title=title,
+        subtitle=sc.subtitle if sc and sc.subtitle else plan.subtitle,
         elements=elements,
     )
 
@@ -932,8 +801,8 @@ def _extract_chart_data(table: DataTable) -> tuple[list[str], list[ChartSeries]]
     return categories, series_list
 
 
-def _build_table_slide(plan: SlidePlanItem, sections: list[ContentSection]) -> SlideSpec | None:
-    """Build a table slide."""
+def _build_table_slide(plan: SlidePlanItem, sections: list[ContentSection], sc: SlideContent | None = None) -> SlideSpec:
+    """Build a table slide using AI-written table summary."""
     table = None
     for sec in sections:
         for t in sec.tables:
@@ -944,11 +813,11 @@ def _build_table_slide(plan: SlidePlanItem, sections: list[ContentSection]) -> S
             break
 
     if not table:
-        return None
+        return _build_bullets_slide(plan, sections, sc)
 
-    # Limit table size
     headers = table.headers[:6]
     rows = [row[:6] for row in table.rows[:8]]
+    title = sc.title if sc and sc.title else (plan.action_title or plan.title)
 
     elements = [
         SlideElement(
@@ -958,12 +827,15 @@ def _build_table_slide(plan: SlidePlanItem, sections: list[ContentSection]) -> S
         )
     ]
 
+    # Add table summary as subtitle if AI provided one
+    subtitle = sc.table_summary if sc and sc.table_summary else plan.subtitle
+
     return SlideSpec(
         slide_number=plan.slide_number,
         slide_type="table",
         layout_name=config.LAYOUT_TITLE_ONLY,
-        title=plan.title,
-        subtitle=plan.subtitle,
+        title=title,
+        subtitle=subtitle,
         elements=elements,
     )
 
@@ -972,27 +844,34 @@ def _build_kpi_slide(
     plan: SlidePlanItem,
     sections: list[ContentSection],
     tree: ContentTree,
-) -> SlideSpec | None:
-    """Build a KPI cards slide from metrics."""
-    metrics: list[KeyMetric] = []
-    for sec in sections:
-        metrics.extend(sec.metrics)
-        for sub in sec.subsections:
-            metrics.extend(sub.metrics)
+    sc: SlideContent | None = None,
+) -> SlideSpec:
+    """Build a KPI cards slide using AI-written infographic items or raw metrics."""
+    # AI-written infographic items preferred
+    if sc and sc.infographic_items:
+        items = sc.infographic_items[:6]
+    else:
+        metrics: list[KeyMetric] = []
+        for sec in sections:
+            metrics.extend(sec.metrics)
+            for sub in sec.subsections:
+                metrics.extend(sub.metrics)
 
-    if not metrics:
-        metrics = tree.all_metrics[:5]
+        if not metrics:
+            metrics = tree.all_metrics[:5]
 
-    if not metrics:
-        return None
+        if not metrics:
+            return _build_bullets_slide(plan, sections, sc)
 
-    items = []
-    for m in metrics[:5]:
-        items.append(InfographicItem(
-            title=_smart_truncate(m.label, 50),
-            description="",
-            value=m.value,
-        ))
+        items = []
+        for m in metrics[:5]:
+            items.append(InfographicItem(
+                title=m.label,
+                description="",
+                value=m.value,
+            ))
+
+    title = sc.title if sc and sc.title else (plan.action_title or plan.title)
 
     elements = [
         SlideElement(
@@ -1009,8 +888,8 @@ def _build_kpi_slide(
         slide_number=plan.slide_number,
         slide_type="infographic",
         layout_name=config.LAYOUT_TITLE_ONLY,
-        title=plan.title,
-        subtitle=plan.subtitle,
+        title=title,
+        subtitle=sc.subtitle if sc and sc.subtitle else plan.subtitle,
         elements=elements,
     )
 
@@ -1024,38 +903,39 @@ def _extract_year_from_text(text: str) -> str | None:
     return m.group(1) if m else None
 
 
-def _build_infographic_slide(plan: SlidePlanItem, sections: list[ContentSection]) -> SlideSpec | None:
-    """Build an infographic slide."""
+def _build_infographic_slide(plan: SlidePlanItem, sections: list[ContentSection], sc: SlideContent | None = None) -> SlideSpec:
+    """Build an infographic slide using AI-written items."""
     infographic_type = plan.infographic_type_hint or "process_flow"
-    is_timeline = infographic_type == "timeline"
 
-    items = []
-    for sec in sections:
-        # Use subsection headings as items
-        if sec.subsections:
-            for sub in sec.subsections[:6]:
-                desc = _smart_truncate(sub.text, 150) if sub.text else (_smart_truncate(sub.bullets[0], 150) if sub.bullets else "")
-                title = _smart_truncate(sub.heading, 80)
-                value = sub.metrics[0].value if sub.metrics else None
-                # For timelines, try to extract year from heading/text
-                if is_timeline and not value:
-                    value = _extract_year_from_text(sub.heading) or _extract_year_from_text(sub.text or "")
-                if title.strip():  # skip empty items
-                    items.append(InfographicItem(title=title, description=desc, value=value))
-        elif sec.bullets:
-            for b in sec.bullets[:6]:
-                # Split bullet into title and description
-                parts = b.split(":", 1) if ":" in b else (b.split("–", 1) if "–" in b else [b])
-                title = _smart_truncate(parts[0].strip(), 80)
-                desc = _smart_truncate(parts[1].strip(), 150) if len(parts) > 1 else ""
-                value = None
-                if is_timeline:
-                    value = _extract_year_from_text(b)
-                if title.strip():  # skip empty items
-                    items.append(InfographicItem(title=title, description=desc, value=value))
+    # AI-written infographic items preferred
+    if sc and sc.infographic_items:
+        items = sc.infographic_items[:6]
+    else:
+        is_timeline = infographic_type == "timeline"
+        items = []
+        for sec in sections:
+            if sec.subsections:
+                for sub in sec.subsections[:6]:
+                    desc = sub.text[:150] if sub.text else (sub.bullets[0][:150] if sub.bullets else "")
+                    title = sub.heading[:80]
+                    value = sub.metrics[0].value if sub.metrics else None
+                    if is_timeline and not value:
+                        value = _extract_year_from_text(sub.heading) or _extract_year_from_text(sub.text or "")
+                    if title.strip():
+                        items.append(InfographicItem(title=title, description=desc, value=value))
+            elif sec.bullets:
+                for b in sec.bullets[:6]:
+                    parts = b.split(":", 1) if ":" in b else (b.split("–", 1) if "–" in b else [b])
+                    title = parts[0].strip()[:80]
+                    desc = parts[1].strip()[:150] if len(parts) > 1 else ""
+                    value = _extract_year_from_text(b) if is_timeline else None
+                    if title.strip():
+                        items.append(InfographicItem(title=title, description=desc, value=value))
 
     if not items:
-        return None
+        return _build_bullets_slide(plan, sections, sc)
+
+    title = sc.title if sc and sc.title else (plan.action_title or plan.title)
 
     elements = [
         SlideElement(
@@ -1072,67 +952,8 @@ def _build_infographic_slide(plan: SlidePlanItem, sections: list[ContentSection]
         slide_number=plan.slide_number,
         slide_type="infographic",
         layout_name=config.LAYOUT_TITLE_ONLY,
-        title=plan.title,
-        subtitle=plan.subtitle,
-        elements=elements,
-    )
-
-
-def _build_infographic_slide_with_type(
-    plan: SlidePlanItem,
-    sections: list[ContentSection],
-    infographic_type: str,
-) -> SlideSpec | None:
-    """Build an infographic slide with a specific type (used by infographic-first detection)."""
-    is_timeline = infographic_type == "timeline"
-    items = []
-    for sec in sections:
-        if sec.subsections:
-            for sub in sec.subsections[:6]:
-                desc = _smart_truncate(sub.text, 100) if sub.text else (_smart_truncate(sub.bullets[0], 100) if sub.bullets else "")
-                title = _smart_truncate(sub.heading, 50)
-                value = sub.metrics[0].value if sub.metrics else None
-                if is_timeline and not value:
-                    value = _extract_year_from_text(sub.heading) or _extract_year_from_text(sub.text or "")
-                if title.strip():
-                    items.append(InfographicItem(title=title, description=desc, value=value))
-        elif sec.bullets:
-            for b in sec.bullets[:6]:
-                parts = b.split(":", 1) if ":" in b else (b.split("–", 1) if "–" in b else [b])
-                title = _smart_truncate(parts[0].strip(), 50)
-                desc = _smart_truncate(parts[1].strip(), 100) if len(parts) > 1 else ""
-                value = _extract_year_from_text(b) if is_timeline else None
-                if title.strip():
-                    items.append(InfographicItem(title=title, description=desc, value=value))
-        elif sec.text:
-            sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', sec.text) if len(s.strip()) > 15]
-            for s in sentences[:6]:
-                title = _smart_truncate(s, 50)
-                desc = _smart_truncate(s[50:], 100) if len(s) > 50 else ""
-                value = _extract_year_from_text(s) if is_timeline else None
-                if title.strip():
-                    items.append(InfographicItem(title=title, description=desc, value=value))
-
-    if len(items) < 2:
-        return None
-
-    elements = [
-        SlideElement(
-            element_type="infographic",
-            position=_grid.full(),
-            content=InfographicContent(
-                infographic_type=infographic_type,
-                items=items[:6],
-            ),
-        )
-    ]
-
-    return SlideSpec(
-        slide_number=plan.slide_number,
-        slide_type="infographic",
-        layout_name=config.LAYOUT_TITLE_ONLY,
-        title=plan.title,
-        subtitle=plan.subtitle,
+        title=title,
+        subtitle=sc.subtitle if sc and sc.subtitle else plan.subtitle,
         elements=elements,
     )
 
@@ -1141,17 +962,21 @@ def _build_mixed_slide(
     plan: SlidePlanItem,
     sections: list[ContentSection],
     tree: ContentTree,
-) -> SlideSpec | None:
-    """Build a mixed slide: visual element (left) + bullets (right) in two-column layout."""
+    sc: SlideContent | None = None,
+) -> SlideSpec:
+    """Build a mixed slide: visual element (left) + AI-written bullets (right)."""
     elements = []
 
-    # Collect bullets
-    bullets: list[str] = []
-    for sec in sections:
-        bullets.extend(sec.bullets[:4])
-        for sub in sec.subsections:
-            bullets.extend(sub.bullets[:3])
-    bullets = [_smart_truncate(b, config.MAX_CHARS_PER_BULLET) for b in bullets[:config.MAX_BULLETS_PER_SLIDE]]
+    # AI-written bullets preferred
+    if sc and sc.bullets:
+        bullets = sc.bullets[:config.MAX_BULLETS_PER_SLIDE]
+    else:
+        bullets = []
+        for sec in sections:
+            bullets.extend(sec.bullets[:4])
+            for sub in sec.subsections:
+                bullets.extend(sub.bullets[:3])
+        bullets = bullets[:config.MAX_BULLETS_PER_SLIDE]
 
     # Try to build a chart for left side
     chart_elem = None
@@ -1163,12 +988,13 @@ def _build_mixed_slide(
                 if series_list:
                     categories = [str(row[0]) for row in t.rows[:8]] if t.rows else []
                     pos_left, pos_right = _grid.two_column()
+                    chart_title = sc.chart_insight if sc and sc.chart_insight else ""
                     chart_elem = SlideElement(
                         element_type="chart",
                         position=pos_left,
                         content=ChartContent(
                             chart_type=chart_type,
-                            title="",
+                            title=chart_title,
                             categories=categories,
                             series=series_list,
                         ),
@@ -1177,22 +1003,25 @@ def _build_mixed_slide(
         if chart_elem:
             break
 
-    # If no chart, try infographic on left
+    # If no chart, try infographic on left using AI items
     if not chart_elem:
         inf_items = []
-        for sec in sections:
-            for sub in sec.subsections[:4]:
-                inf_items.append(InfographicItem(
-                    title=_smart_truncate(sub.heading, 40),
-                    description=_smart_truncate(sub.text or "", 80),
-                ))
-            if not inf_items and sec.bullets:
-                for b in sec.bullets[:4]:
-                    parts = b.split(":", 1) if ":" in b else (b.split("–", 1) if "–" in b else [b])
+        if sc and sc.infographic_items:
+            inf_items = sc.infographic_items[:4]
+        else:
+            for sec in sections:
+                for sub in sec.subsections[:4]:
                     inf_items.append(InfographicItem(
-                        title=_smart_truncate(parts[0].strip(), 40),
-                        description=_smart_truncate(parts[1].strip(), 80) if len(parts) > 1 else "",
+                        title=sub.heading[:40],
+                        description=(sub.text or "")[:80],
                     ))
+                if not inf_items and sec.bullets:
+                    for b in sec.bullets[:4]:
+                        parts = b.split(":", 1) if ":" in b else [b]
+                        inf_items.append(InfographicItem(
+                            title=parts[0].strip()[:40],
+                            description=parts[1].strip()[:80] if len(parts) > 1 else "",
+                        ))
         if inf_items:
             pos_left, pos_right = _grid.two_column()
             chart_elem = SlideElement(
@@ -1205,7 +1034,7 @@ def _build_mixed_slide(
             )
 
     if not chart_elem and not bullets:
-        return None
+        return _build_bullets_slide(plan, sections, sc)
 
     if chart_elem:
         elements.append(chart_elem)
@@ -1217,12 +1046,14 @@ def _build_mixed_slide(
             content=BulletContent(items=bullets, font_size=13),
         ))
 
+    title = sc.title if sc and sc.title else (plan.action_title or plan.title)
+
     return SlideSpec(
         slide_number=plan.slide_number,
         slide_type="mixed",
         layout_name=config.LAYOUT_TITLE_ONLY,
-        title=plan.title,
-        subtitle=plan.subtitle,
+        title=title,
+        subtitle=sc.subtitle if sc and sc.subtitle else plan.subtitle,
         elements=elements,
     )
 
@@ -1232,279 +1063,37 @@ def _build_conclusion_slide(
     sections: list[ContentSection],
     tree: ContentTree,
     slide_plan: SlidePlan | None = None,
+    sc: SlideContent | None = None,
 ) -> SlideSpec:
-    """Build conclusion / key takeaways slide with robust multi-source fallback."""
-    bullets = []
-
-    # Source 1: Try to get content from conclusion sections
-    for sec in sections:
-        if sec.bullets:
-            bullets.extend(sec.bullets)
-        elif sec.text:
-            sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', sec.text) if s.strip()]
-            bullets.extend(sentences)
-
-    # Source 2: Aggregate key_messages from all plan items
-    if not bullets and slide_plan:
-        for item in slide_plan.slides:
-            if item.key_message and item.key_message.strip():
-                bullets.append(item.key_message.strip())
-
-    # Source 3: Executive summary key sentences
-    if not bullets and tree.executive_summary:
-        sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', tree.executive_summary) if s.strip()]
-        bullets.extend(sentences[:6])
-
-    # Source 4: First bullets from each top section
-    if not bullets:
-        for sec in tree.sections[:8]:
+    """Build conclusion / key takeaways slide using AI-written synthesis."""
+    # AI-written bullets preferred — conclusion should be AI-synthesized from entire deck
+    if sc and sc.bullets:
+        bullets = sc.bullets[:config.MAX_BULLETS_PER_SLIDE]
+    else:
+        bullets = []
+        for sec in sections:
             if sec.bullets:
-                bullets.append(sec.bullets[0])
-            elif sec.text:
-                first_sentence = re.split(r'(?<=[.!?])\s+', sec.text)
-                if first_sentence:
-                    bullets.append(first_sentence[0].strip())
-
-    # Absolute fallback
-    if not bullets:
-        bullets = ["Key findings and strategic recommendations from this analysis"]
-
-    cleaned: list[str] = []
-    seen: set[str] = set()
-    for bullet in bullets:
-        normalized = bullet.strip().lstrip("•-").strip()
-        if not normalized:
-            continue
-        # Fuzzy dedup: first 40 chars to avoid over-filtering
-        key = normalized.lower()[:40]
-        if key in seen:
-            continue
-        seen.add(key)
-        cleaned.append(normalized)
-
-    if len(cleaned) < 3 and tree.executive_summary:
-        sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', tree.executive_summary) if s.strip()]
-        for sentence in sentences:
-            key = sentence.lower()
-            if key not in seen:
-                seen.add(key)
-                cleaned.append(sentence)
-            if len(cleaned) >= config.MAX_BULLETS_PER_SLIDE:
-                break
-
-    if len(cleaned) < 3:
-        for sec in tree.sections[:8]:
-            candidate = ""
-            if sec.bullets:
-                candidate = sec.bullets[0].strip()
+                bullets.extend(sec.bullets)
             elif sec.text:
                 sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', sec.text) if s.strip()]
-                candidate = sentences[0] if sentences else ""
-            key = candidate.lower()[:40]
-            if candidate and key not in seen:
-                seen.add(key)
-                cleaned.append(candidate)
-            if len(cleaned) >= config.MAX_BULLETS_PER_SLIDE:
-                break
+                bullets.extend(sentences)
+        bullets = bullets[:config.MAX_BULLETS_PER_SLIDE]
 
-    # Source 5: extract first meaningful sentence from each section (no synthetic placeholders)
-    if len(cleaned) < 3:
-        for sec in tree.sections[:8]:
-            candidate = ""
-            # Prefer a real sentence from the section text
-            if sec.text:
-                sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', sec.text) if len(s.strip()) > 20]
-                candidate = sentences[0] if sentences else ""
-            # Fallback to first substantial bullet
-            if not candidate and sec.bullets:
-                substantial = [b.strip() for b in sec.bullets if len(b.strip()) > 20]
-                candidate = substantial[0] if substantial else ""
-            if candidate:
-                key = candidate.lower()[:40]
-                if key not in seen:
-                    seen.add(key)
-                    cleaned.append(candidate)
-            if len(cleaned) >= config.MAX_BULLETS_PER_SLIDE:
-                break
+    title = sc.title if sc and sc.title else (plan.action_title or plan.title or "Key Takeaways")
 
-    if not cleaned:
-        # Use the deck title for a professional summary instead of generic placeholder
-        deck_title = tree.title.strip() if tree.title else "this analysis"
-        cleaned = [f"This report presents key findings and strategic recommendations regarding {deck_title}."]
-
-    _max_chars = getattr(config, 'MAX_CONCLUSION_CHARS', config.MAX_CHARS_PER_BULLET)
-    bullets = [_smart_truncate(b, _max_chars) for b in cleaned[:config.MAX_BULLETS_PER_SLIDE]]
-
-    elements = [
-        SlideElement(
+    elements = []
+    if bullets:
+        elements.append(SlideElement(
             element_type="bullets",
             position=_grid.full(),
             content=BulletContent(items=bullets, font_size=14),
-        )
-    ]
+        ))
 
     return SlideSpec(
         slide_number=plan.slide_number,
         slide_type="conclusion",
         layout_name=config.LAYOUT_TITLE_ONLY,
-        title=plan.title or "Key Takeaways",
-        subtitle=plan.subtitle,
-        elements=elements,
-    )
-
-
-def _llm_generate_slide(plan_item: SlidePlanItem, source_text: str) -> SlideSpec:
-    """Use LLM to generate slide content for complex cases."""
-    user_prompt = f"""\
-Generate slide content for:
-- Slide type: {plan_item.slide_type}
-- Title: {plan_item.title}
-- Visualization: {plan_item.visualization_hint}
-- Key message: {plan_item.key_message}
-
-Source content:
-{source_text}
-
-Return JSON with the slide content.\
-"""
-
-    try:
-        raw = invoke_llm(
-            system_prompt=SPEC_SYSTEM_PROMPT,
-            user_prompt=user_prompt,
-            estimated_tokens=4000,
-        )
-        return _parse_llm_slide_response(raw, plan_item)
-    except Exception as e:
-        logger.warning(f"LLM slide generation failed for slide {plan_item.slide_number}: {e}")
-        # Fallback: create a simple text slide
-        return _fallback_text_slide(plan_item, source_text)
-
-
-def _parse_llm_slide_response(raw: str, plan_item: SlidePlanItem) -> SlideSpec:
-    """Parse the LLM JSON response into a SlideSpec."""
-    # Extract JSON from response (may be wrapped in markdown code blocks)
-    json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', raw, re.DOTALL)
-    if json_match:
-        json_str = json_match.group(1)
-    else:
-        # Try to find raw JSON
-        json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', raw, re.DOTALL)
-        json_str = json_match.group(0) if json_match else raw
-
-    try:
-        data = json.loads(json_str)
-    except json.JSONDecodeError:
-        logger.warning(f"Failed to parse LLM JSON for slide {plan_item.slide_number}")
-        return _fallback_text_slide(plan_item, "")
-
-    elements = []
-    content_type = data.get("content_type", "bullets")
-
-    if content_type == "bullets" and data.get("bullets"):
-        items = [_smart_truncate(str(b), config.MAX_CHARS_PER_BULLET) for b in data["bullets"][:config.MAX_BULLETS_PER_SLIDE]]
-        elements.append(SlideElement(
-            element_type="bullets",
-            position=_grid.full(),
-            content=BulletContent(items=items, font_size=14),
-        ))
-
-    elif content_type == "chart" and data.get("categories") and data.get("series"):
-        series_list = []
-        for s in data["series"][:5]:
-            vals = [float(v) for v in s.get("values", [])]
-            if vals:
-                series_list.append(ChartSeries(name=str(s.get("name", ""))[:30], values=vals))
-        if series_list:
-            elements.append(SlideElement(
-                element_type="chart",
-                position=_grid.chart(),
-                content=ChartContent(
-                    chart_type=data.get("chart_type", "column"),
-                    title=data.get("chart_title", ""),
-                    categories=[str(c)[:30] for c in data["categories"]],
-                    series=series_list,
-                ),
-            ))
-
-    elif content_type == "table" and data.get("table_headers") and data.get("table_rows"):
-        elements.append(SlideElement(
-            element_type="table",
-            position=_grid.table(),
-            content=TableContent(
-                headers=[str(h)[:30] for h in data["table_headers"][:6]],
-                rows=[[str(c)[:30] for c in row[:6]] for row in data["table_rows"][:8]],
-            ),
-        ))
-
-    elif content_type in ("infographic", "kpi") and data.get("infographic_items"):
-        items = []
-        for item in data["infographic_items"][:6]:
-            items.append(InfographicItem(
-                title=_smart_truncate(str(item.get("title", "")), 50),
-                description=_smart_truncate(str(item.get("description", "")), 100),
-                value=str(item.get("value", "")) if item.get("value") else None,
-            ))
-        inf_type = data.get("infographic_type", "kpi_cards")
-        if inf_type not in ("process_flow", "timeline", "comparison", "kpi_cards", "hierarchy"):
-            inf_type = "kpi_cards"
-        elements.append(SlideElement(
-            element_type="infographic",
-            position=_grid.full(),
-            content=InfographicContent(infographic_type=inf_type, items=items),
-        ))
-
-    elif content_type == "text" and data.get("text"):
-        elements.append(SlideElement(
-            element_type="text",
-            position=_grid.full(),
-            content=TextContent(text=data["text"][:500], font_size=14),
-        ))
-
-    # If nothing was parsed, create fallback
-    if not elements:
-        bullets = data.get("bullets", [])
-        if bullets:
-            items = [_smart_truncate(str(b), config.MAX_CHARS_PER_BULLET) for b in bullets[:config.MAX_BULLETS_PER_SLIDE]]
-            elements.append(SlideElement(
-                element_type="bullets",
-                position=_grid.full(),
-                content=BulletContent(items=items, font_size=14),
-            ))
-
-    return SlideSpec(
-        slide_number=plan_item.slide_number,
-        slide_type=plan_item.slide_type,
-        layout_name=config.LAYOUT_TITLE_ONLY,
-        title=data.get("title", plan_item.title),
-        subtitle=data.get("subtitle", plan_item.subtitle),
-        elements=elements,
-    )
-
-
-def _fallback_text_slide(plan_item: SlidePlanItem, source_text: str) -> SlideSpec:
-    """Create a minimal text slide as fallback — never show placeholder text."""
-    text = ""
-    if plan_item.key_message and plan_item.key_message.strip():
-        text = plan_item.key_message.strip()
-    elif source_text and source_text.strip():
-        # Extract first few real sentences from source instead of raw dump
-        sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', source_text) if len(s.strip()) > 15]
-        text = " ".join(sentences[:4])[:500]
-    if not text:
-        text = plan_item.title or "Overview"
-    elements = [
-        SlideElement(
-            element_type="text",
-            position=_grid.full(),
-            content=TextContent(text=_smart_truncate(text, 400), font_size=14),
-        )
-    ]
-    return SlideSpec(
-        slide_number=plan_item.slide_number,
-        slide_type=plan_item.slide_type,
-        layout_name=config.LAYOUT_TITLE_ONLY,
-        title=plan_item.title,
-        subtitle=plan_item.subtitle,
+        title=title,
+        subtitle=sc.subtitle if sc and sc.subtitle else plan.subtitle,
         elements=elements,
     )

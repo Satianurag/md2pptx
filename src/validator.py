@@ -57,6 +57,7 @@ def validate_and_fix(
 
     _check_slide_count(spec, result)
     _check_slide_flow(spec, result, master_info)
+    _enforce_narrative_arc(spec, result)
     _check_visual_ratio(spec, result, content_profile)
 
     for slide in spec.slides:
@@ -75,22 +76,70 @@ def validate_and_fix(
 def _check_slide_count(spec: PresentationSpec, result: ValidationResult) -> None:
     n = len(spec.slides)
     if n > config.MAX_SLIDES:
-        # Enforce: trim excess content slides from the middle, keep bookends
+        # Enforce: trim excess content slides using importance-based selection
         cover = [s for s in spec.slides if s.slide_type == "cover"][:1]
         thank = [s for s in spec.slides if s.slide_type == "thank_you"][-1:]
         middle = [s for s in spec.slides if s.slide_type not in ("cover", "thank_you")]
         allowed = config.MAX_SLIDES - len(cover) - len(thank)
         if len(middle) > allowed:
-            middle = middle[:allowed]
+            # Sort by importance_score (descending), keep top N, then re-sort by position
+            middle.sort(key=lambda s: s.importance_score, reverse=True)
+            kept = middle[:allowed]
+            dropped = middle[allowed:]
+            # Preserve original ordering
+            kept.sort(key=lambda s: s.slide_number)
+            dropped_types = [f"{s.slide_type}({s.slide_number})" for s in dropped]
             result.fixes_applied.append(
-                f"Trimmed to {config.MAX_SLIDES} slides (was {n})"
+                f"Trimmed to {config.MAX_SLIDES} slides (was {n}), dropped: {', '.join(dropped_types)}"
             )
+            middle = kept
         spec.slides = cover + middle + thank
         # Renumber
         for i, s in enumerate(spec.slides):
             s.slide_number = i + 1
     elif n < config.MIN_SLIDES:
         result.warnings.append(f"Only {n} slides, minimum is {config.MIN_SLIDES}")
+
+
+def _enforce_narrative_arc(spec: PresentationSpec, result: ValidationResult) -> None:
+    """Warn on narrative arc violations — Introduction → Body → Conclusion flow.
+
+    This is advisory (warnings only) to preserve the planner's decisions while
+    flagging issues for debugging.
+    """
+    slides = spec.slides
+    if len(slides) < 4:
+        return
+
+    # Check: executive_summary should come before body content
+    exec_idx = next(
+        (i for i, s in enumerate(slides) if s.slide_type == "executive_summary"), -1
+    )
+    first_content_idx = next(
+        (i for i, s in enumerate(slides)
+         if s.slide_type in ("content", "chart", "table", "infographic", "mixed")), -1
+    )
+    if exec_idx > 0 and first_content_idx > 0 and exec_idx > first_content_idx:
+        result.warnings.append(
+            f"Narrative arc: executive_summary (slide {exec_idx + 1}) "
+            f"appears after first content slide (slide {first_content_idx + 1})"
+        )
+
+    # Check: conclusion should come after all content
+    conclusion_idx = next(
+        (i for i, s in enumerate(slides) if s.slide_type == "conclusion"), -1
+    )
+    if conclusion_idx > 0:
+        content_after = [
+            i for i, s in enumerate(slides)
+            if i > conclusion_idx
+            and s.slide_type in ("content", "chart", "table", "infographic", "mixed")
+        ]
+        if content_after:
+            result.warnings.append(
+                f"Narrative arc: content slides {content_after} appear after conclusion "
+                f"(slide {conclusion_idx + 1})"
+            )
 
 
 def _check_visual_ratio(spec: PresentationSpec, result: ValidationResult, profile=None) -> None:
@@ -192,18 +241,24 @@ def _enforce_slide_ordering(spec: PresentationSpec, result: ValidationResult, ma
     else:
         result.warnings.append("No cover slide found in presentation")
 
-    # --- Ensure thank_you is last ---
-    ty_slides = [s for s in slides if s.slide_type == "thank_you"]
-    non_ty = [s for s in slides if s.slide_type != "thank_you"]
-    if ty_slides:
-        if slides[-1].slide_type != "thank_you":
-            result.fixes_applied.append("Moved thank_you slide to last position")
-        slides = non_ty + ty_slides[-1:]
+    # --- Handle thank_you slide ---
+    if master_info:
+        # Template provides the closing slide — strip any generated thank_you
+        ty_in_plan = [s for s in slides if s.slide_type == "thank_you"]
+        if ty_in_plan:
+            slides = [s for s in slides if s.slide_type != "thank_you"]
+            result.fixes_applied.append(
+                "Removed thank_you slide — template provides the closing slide"
+            )
     else:
-        # Only auto-create thank_you when there is NO template at all.
-        # When a template is used, the renderer adds the template's closing
-        # slide (which may or may not be a "thank you") as a fixed bookend.
-        if not master_info:
+        # No template — ensure thank_you is present and last
+        ty_slides = [s for s in slides if s.slide_type == "thank_you"]
+        non_ty = [s for s in slides if s.slide_type != "thank_you"]
+        if ty_slides:
+            if slides[-1].slide_type != "thank_you":
+                result.fixes_applied.append("Moved thank_you slide to last position")
+            slides = non_ty + ty_slides[-1:]
+        else:
             ty = SlideSpec(
                 slide_number=len(slides) + 1,
                 slide_type="thank_you",

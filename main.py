@@ -23,7 +23,10 @@ console = Console()
 
 def _auto_slide_count(file_size_bytes: int, md_text: str | None = None) -> int:
     """Pick a target slide count (10-15) using content profiling when available,
-    falling back to file-size heuristic otherwise."""
+    falling back to file-size heuristic otherwise.
+
+    Default bias: 15 slides (2026 standard).  Only go lower if content is genuinely thin.
+    """
     if md_text:
         try:
             from src.markdown_parser import parse_markdown
@@ -32,8 +35,8 @@ def _auto_slide_count(file_size_bytes: int, md_text: str | None = None) -> int:
             prof = profile_content(tree)
             # Base: 4 structural slides (cover + agenda + conclusion + thank_you)
             base = 4
-            # Add 1 slide per section, capped at 9 content slides
-            section_slides = min(prof.total_sections, 9)
+            # Add 1 slide per section, capped at 11 content slides
+            section_slides = min(prof.total_sections, 11)
             # Bonus slides for data-rich content
             bonus = 0
             if prof.total_tables >= 3:
@@ -45,16 +48,15 @@ def _auto_slide_count(file_size_bytes: int, md_text: str | None = None) -> int:
         except Exception:
             pass  # fall back to size-based
 
+    # File-size heuristic — biased toward 15
     kb = file_size_bytes / 1024
-    if kb < 30:
+    if kb < 15:
         return 10
-    elif kb < 100:
-        return 11
-    elif kb < 300:
+    elif kb < 30:
         return 12
-    elif kb < 600:
+    elif kb < 60:
         return 13
-    elif kb < 1500:
+    elif kb < 150:
         return 14
     else:
         return 15
@@ -78,7 +80,7 @@ def process_single(
     md_path: str,
     template_path: str = "",
     output_path: str = "",
-    target_slides: int = 12,
+    target_slides: int = 15,
 ) -> bool:
     """Process a single markdown file. Returns True on success."""
     md_file = Path(md_path)
@@ -143,7 +145,7 @@ def process_single(
 def process_batch(
     input_dir: str,
     template_path: str = "",
-    target_slides: int = 12,
+    target_slides: int = 15,
 ) -> None:
     """Process all .md files in a directory."""
     md_dir = Path(input_dir)
@@ -211,8 +213,8 @@ def main() -> None:
     parser.add_argument(
         "--slides", "-s",
         type=int,
-        default=12,
-        help="Target slide count (10-15, default: 12). Use 0 for auto-detection based on file size.",
+        default=15,
+        help="Target slide count (10-15, default: 15). Use 0 for auto-detection based on content.",
     )
     parser.add_argument(
         "--batch", "-b",

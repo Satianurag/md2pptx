@@ -1,14 +1,14 @@
 """Rich PPTX renderer with template bookend system.
 
-When a template has ≥2 slides, the first and last are treated as fixed bookends:
-- **Cover** (first slide layout): title/subtitle filled into placeholders only —
-  no accent bars, no extra shapes.  Preserves template design.
-- **Closing** (last slide layout): added with zero modifications — baked-in
-  "Thank You!" text in the layout is preserved automatically.
+When a template has ≥2 slides, the first and last are **preserved in-place**:
+- **Cover** (first template slide): kept intact, title/subtitle filled into
+  existing placeholders.  All original shapes/graphics preserved.
+- **Closing** (last template slide): kept 100% untouched — all baked-in text,
+  graphics, and design preserved exactly as the template provides.
 
-Layout **index** (not name) is used for bookend selection because templates can
-have multiple layouts with the same name but different designs.  Content slides
-are prevented from accidentally using the closing layout via ``excluded_idx``.
+Only middle example slides are deleted.  Content slides are inserted between
+the kept bookends.  The closing slide's layout index is tracked via
+``excluded_idx`` to prevent content slides from accidentally using it.
 """
 from __future__ import annotations
 import re
@@ -165,7 +165,8 @@ def _set_autofit(text_frame, *, shrink_ok: bool = False) -> None:
 
 def _set_text_frame_text(text_frame, text: str, font_size=None, bold: bool | None = None,
                          alignment=None, color_rgb: RGBColor | None = None,
-                         theme_color: MSO_THEME_COLOR | None = None) -> None:
+                         theme_color: MSO_THEME_COLOR | None = None,
+                         font_name: str | None = None) -> None:
     """Replace a text frame with a single formatted paragraph."""
     text_frame.clear()
     text_frame.word_wrap = True
@@ -185,10 +186,13 @@ def _set_text_frame_text(text_frame, text: str, font_size=None, bold: bool | Non
         p.font.color.theme_color = theme_color
     elif color_rgb is not None:
         p.font.color.rgb = color_rgb
+    if font_name:
+        p.font.name = font_name
     _set_autofit(text_frame)
 
 
-def _populate_text_list(text_frame, items: list[str], font_size, prefix: str = "") -> None:
+def _populate_text_list(text_frame, items: list[str], font_size, prefix: str = "",
+                        font_name: str | None = None) -> None:
     """Populate a text frame with a concise multi-paragraph list."""
     text_frame.clear()
     text_frame.word_wrap = True
@@ -204,6 +208,8 @@ def _populate_text_list(text_frame, items: list[str], font_size, prefix: str = "
         p.line_spacing = Pt(int(font_size.pt * 1.4)) if hasattr(font_size, 'pt') else None
         if idx > 0:
             p.space_before = config.BULLET_SPACE_BEFORE
+        if font_name:
+            p.font.name = font_name
     _set_autofit(text_frame, shrink_ok=True)
 
 
@@ -244,6 +250,7 @@ def _render_slide_title(slide, title: str, subtitle: str | None = None, has_tpl:
             font_size=config.FONT_TITLE,
             bold=True,
             alignment=PP_ALIGN.LEFT,
+            font_name=config.FONT_NAME_PRIMARY,
         )
         return
     _add_title_bar(slide, title, subtitle, has_tpl)
@@ -277,30 +284,39 @@ def render_presentation(spec: PresentationSpec, output_path: str | Path) -> Path
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     template_path = spec.template_path
-    first_slide_layout_idx = None
     last_slide_layout_idx = None
 
     if template_path and Path(template_path).exists():
         prs = Presentation(str(template_path))
+        n_tpl_slides = len(prs.slides)
 
-        # Capture layout indices from first and last slides before removing them.
-        # We use index (not name) because templates can have duplicate layout names
-        # pointing to different designs (e.g. UAE template has 3 layouts named the
-        # same, but only index 4 contains the "Thank you!" design).
-        if len(prs.slides) > 0:
-            first_slide_layout_idx = list(prs.slide_layouts).index(prs.slides[0].slide_layout)
-        if len(prs.slides) > 1:
-            last_slide_layout_idx = list(prs.slide_layouts).index(prs.slides[-1].slide_layout)
-
-        # Remove existing slides from template (they're just examples)
-        while len(prs.slides) > 0:
-            rId = prs.slides._sldIdLst[-1].rId
-            prs.part.drop_rel(rId)
-            prs.slides._sldIdLst.remove(prs.slides._sldIdLst[-1])
+        # Bookend mode: keep template's first (cover) and last (thank you) slides
+        # intact.  Delete only the middle example slides.
+        if n_tpl_slides >= 2:
+            last_slide_layout_idx = list(prs.slide_layouts).index(
+                prs.slides[-1].slide_layout
+            )
+            # Delete middle slides (indices 1..N-2), iterate in reverse
+            for i in range(n_tpl_slides - 2, 0, -1):
+                rId = prs.slides._sldIdLst[i].rId
+                prs.part.drop_rel(rId)
+                prs.slides._sldIdLst.remove(prs.slides._sldIdLst[i])
+            template_has_bookends = True
+            _log.info(f"Template bookends: kept slide 1 (cover) and slide {n_tpl_slides} (closing), removed {n_tpl_slides - 2} middle slides")
+        elif n_tpl_slides == 1:
+            # Only one slide — keep it as cover, no closing bookend
+            last_slide_layout_idx = None
+            template_has_bookends = False
+            _log.info("Template has only 1 slide — using as cover only")
+        else:
+            last_slide_layout_idx = None
+            template_has_bookends = False
     else:
         prs = Presentation()
         prs.slide_width = config.SLIDE_WIDTH
         prs.slide_height = config.SLIDE_HEIGHT
+        template_has_bookends = False
+        last_slide_layout_idx = None
 
     # Capture actual slide dimensions for the rest of the render chain
     _sw = int(prs.slide_width)
@@ -309,46 +325,46 @@ def render_presentation(spec: PresentationSpec, output_path: str | Path) -> Path
 
     master_info = read_slide_master(template_path) if template_path and Path(template_path).exists() else None
 
-    # Template bookend mode: first and last slides come from the template
-    template_has_bookends = (first_slide_layout_idx is not None and last_slide_layout_idx is not None)
-
     if template_has_bookends:
-        # 1. Add cover slide from template layout — fill title/subtitle only
-        _render_template_bookend_cover(prs, spec, first_slide_layout_idx)
-        # 2. Render content slides (skip cover and thank_you — they are bookends)
+        # Cover slide (first template slide) — fill title/subtitle into placeholders
+        cover_slide = prs.slides[0]
+        phs = sorted(cover_slide.placeholders, key=lambda p: p.placeholder_format.idx)
+        if len(phs) >= 1 and spec.title:
+            phs[0].text = spec.title
+            _set_autofit(phs[0].text_frame)
+        if len(phs) >= 2 and spec.subtitle:
+            phs[1].text = spec.subtitle
+            _set_autofit(phs[1].text_frame)
+
+        # Closing slide (last template slide) — 100% untouched
+        # It currently sits at index 1 (after middle deletions).
+        # We need to render content slides between cover and closing.
+        # Strategy: detach closing sldId from the list, render content slides
+        # (python-pptx appends new slides at the end), then re-append closing.
+        # The relationship (rId → slide part) stays intact; we only move the
+        # XML element within the sldIdLst.
+        _closing_sldId = prs.slides._sldIdLst[1]
+        prs.slides._sldIdLst.remove(_closing_sldId)
+
+        # Render content slides (skip cover and thank_you — template provides them)
         for slide_spec in spec.slides:
             if slide_spec.slide_type in ("cover", "thank_you"):
                 continue
             _render_slide(prs, slide_spec, master_info, deck_title=spec.title,
                           excluded_layout_idx=last_slide_layout_idx)
-        # 3. Add closing slide from template layout — zero modifications
-        _render_template_bookend_closing(prs, last_slide_layout_idx)
+
+        # Re-append closing slide at the end
+        prs.slides._sldIdLst.append(_closing_sldId)
+
+        # Renumber slide part names to avoid duplicate zip entry warnings
+        rIds = [sldId.rId for sldId in prs.slides._sldIdLst]
+        prs.part.rename_slide_parts(rIds)
     else:
         for slide_spec in spec.slides:
             _render_slide(prs, slide_spec, master_info, deck_title=spec.title)
 
     prs.save(str(output_path))
     return output_path
-
-
-def _render_template_bookend_cover(prs: Presentation, spec: PresentationSpec, layout_idx: int) -> None:
-    """Add the template's cover slide and fill only title/subtitle into placeholders."""
-    layout = prs.slide_layouts[layout_idx]
-    slide = prs.slides.add_slide(layout)
-
-    phs = sorted(slide.placeholders, key=lambda p: p.placeholder_format.idx)
-    if len(phs) >= 1 and spec.title:
-        phs[0].text = spec.title
-        _set_autofit(phs[0].text_frame)
-    if len(phs) >= 2 and spec.subtitle:
-        phs[1].text = spec.subtitle
-        _set_autofit(phs[1].text_frame)
-
-
-def _render_template_bookend_closing(prs: Presentation, layout_idx: int) -> None:
-    """Add the template's closing slide with zero modifications."""
-    layout = prs.slide_layouts[layout_idx]
-    prs.slides.add_slide(layout)
 
 
 
@@ -439,11 +455,13 @@ def _render_cover(slide, spec: SlideSpec, master_info: SlideMasterInfo | None = 
             for para in ph_list[0].text_frame.paragraphs:
                 for run in para.runs:
                     run.font.size = config.FONT_TITLE
+                    run.font.name = config.FONT_NAME_PRIMARY
         if len(ph_list) >= 2 and spec.subtitle:
             ph_list[1].text = spec.subtitle
             for para in ph_list[1].text_frame.paragraphs:
                 for run in para.runs:
                     run.font.size = config.FONT_SUBTITLE
+                    run.font.name = config.FONT_NAME_PRIMARY
         # Remove remaining unused placeholders to prevent ghost text
         for ph in ph_list[2:]:
             if not ph.text.strip():
@@ -461,11 +479,13 @@ def _render_cover(slide, spec: SlideSpec, master_info: SlideMasterInfo | None = 
         cw = _sw - int(config.MARGIN_LEFT) - int(config.MARGIN_RIGHT)
         _add_textbox(slide, spec.title, config.MARGIN_LEFT, Emu(2400000),
                      cw, Emu(900000),
-                     font_size=config.FONT_TITLE, bold=True, alignment="center")
+                     font_size=config.FONT_TITLE, bold=True, alignment="center",
+                     font_name=config.FONT_NAME_PRIMARY)
         if spec.subtitle:
             _add_textbox(slide, spec.subtitle, config.MARGIN_LEFT, Emu(3500000),
                          cw, Emu(600000),
-                         font_size=config.FONT_SUBTITLE, alignment="center")
+                         font_size=config.FONT_SUBTITLE, alignment="center",
+                         font_name=config.FONT_NAME_PRIMARY)
 
     # Bottom accent bar on cover with gradient
     accent = slide.shapes.add_shape(
@@ -517,13 +537,15 @@ def _render_divider(slide, spec: SlideSpec, has_tpl: bool = False):
     else:
         _add_textbox(slide, spec.title, config.MARGIN_LEFT, Emu(2700000),
                      cw, Emu(900000),
-                     font_size=config.FONT_TITLE, bold=True, alignment="center")
+                     font_size=config.FONT_TITLE, bold=True, alignment="center",
+                     font_name=config.FONT_NAME_PRIMARY)
 
     # Add subtitle as manual textbox when placeholders didn't handle it
     if spec.subtitle and not subtitle_handled:
         _add_textbox(slide, spec.subtitle, config.MARGIN_LEFT, Emu(3700000),
                      cw, Emu(500000),
-                     font_size=config.FONT_SUBTITLE, alignment="center", color="666666")
+                     font_size=config.FONT_SUBTITLE, alignment="center", color="666666",
+                     font_name=config.FONT_NAME_PRIMARY)
 
     # Accent bar under title with gradient — center it horizontally
     bar_y = Emu(4300000) if spec.subtitle else Emu(3800000)
@@ -558,7 +580,8 @@ def _render_thank_you(slide, spec: SlideSpec, master_info: SlideMasterInfo | Non
             _add_textbox(slide, spec.title or "Thank You",
                          int(config.MARGIN_LEFT) + inset, Emu(2800000),
                          cw - 2 * inset, Emu(800000),
-                         font_size=Pt(32), bold=True, alignment="center")
+                         font_size=Pt(32), bold=True, alignment="center",
+                         font_name=config.FONT_NAME_PRIMARY)
         return
 
     # No template — render manually
@@ -570,11 +593,12 @@ def _render_thank_you(slide, spec: SlideSpec, master_info: SlideMasterInfo | Non
     inset = min(Emu(600000), cw // 10)
     _add_textbox(slide, title_text, int(config.MARGIN_LEFT) + inset, Emu(2300000),
                  cw - 2 * inset, Emu(900000),
-                 font_size=Pt(36), bold=True, alignment="center")
+                 font_size=Pt(36), bold=True, alignment="center",
+                 font_name=config.FONT_NAME_PRIMARY)
     _add_textbox(slide, subtitle_text, int(config.MARGIN_LEFT) + inset, Emu(3300000),
                  cw - 2 * inset, Emu(400000),
                  font_size=config.FONT_SUBTITLE, alignment="center",
-                 color="666666")
+                 color="666666", font_name=config.FONT_NAME_PRIMARY)
 
 
 # ── Title bar ───────────────────────────────────────────────────────
@@ -595,6 +619,7 @@ def _add_title_bar(slide, title: str, subtitle: str | None = None, has_tpl: bool
     p.text = title
     p.font.size = config.FONT_TITLE
     p.font.bold = True
+    p.font.name = config.FONT_NAME_PRIMARY
     p.alignment = PP_ALIGN.LEFT
 
     # Subtitle
@@ -610,6 +635,7 @@ def _add_title_bar(slide, title: str, subtitle: str | None = None, has_tpl: bool
         p2 = tf2.paragraphs[0]
         p2.text = subtitle
         p2.font.size = config.FONT_SUBTITLE
+        p2.font.name = config.FONT_NAME_PRIMARY
         p2.font.color.rgb = RGBColor(0x66, 0x66, 0x66)
         p2.alignment = PP_ALIGN.LEFT
 
@@ -641,6 +667,7 @@ def _add_slide_furniture(slide, spec: SlideSpec, has_tpl: bool, deck_title: str)
         p = tf.paragraphs[0]
         p.text = deck_title[:80]
         p.font.size = Pt(8)
+        p.font.name = config.FONT_NAME_PRIMARY
         p.font.color.rgb = RGBColor(0x88, 0x88, 0x88)
         p.alignment = PP_ALIGN.LEFT
 
@@ -654,6 +681,7 @@ def _add_slide_furniture(slide, spec: SlideSpec, has_tpl: bool, deck_title: str)
     p2 = tf2.paragraphs[0]
     p2.text = str(spec.slide_number)
     p2.font.size = Pt(9)
+    p2.font.name = config.FONT_NAME_PRIMARY
     p2.font.bold = True
     p2.font.color.rgb = RGBColor(0x88, 0x88, 0x88)
     p2.alignment = PP_ALIGN.RIGHT
@@ -692,9 +720,25 @@ def _render_element(slide, element: SlideElement,
 
 # ── Text rendering ──────────────────────────────────────────────────
 
+# Simple code detection for bullet items
+def _looks_like_code(text: str) -> bool:
+    """Quick heuristic to detect code-like content for monospace font."""
+    if not text:
+        return False
+    # Patterns: backticks, YAML key:value, JSON brackets, code keywords
+    patterns = [
+        r'\`[^`]+\`',  # inline code
+        r'^\s*[\w\-]+:\s*\S+',  # YAML-like
+        r'[{\[\]}]',  # JSON brackets
+        r'\b(def|class|function|const|let|var)\b',  # code keywords
+    ]
+    matches = sum(1 for p in patterns if re.search(p, text, re.MULTILINE))
+    return matches >= 1 or text.count('`') >= 2
+
+
 def _add_textbox(slide, text, left, top, width, height,
                  font_size=None, bold=False, italic=False,
-                 color=None, alignment=None, autofit=True):
+                 color=None, alignment=None, autofit=True, font_name=None):
     """Helper to add a text box with formatting and optional auto-fit."""
     txBox = slide.shapes.add_textbox(left, top, width, height)
     tf = txBox.text_frame
@@ -715,6 +759,8 @@ def _add_textbox(slide, text, left, top, width, height,
         p.font.color.rgb = _hex_to_rgb(color) if isinstance(color, str) else color
     if alignment and alignment in ALIGN_MAP:
         p.alignment = ALIGN_MAP[alignment]
+    if font_name:
+        p.font.name = font_name
     if autofit:
         _set_autofit(tf)
     else:
@@ -724,12 +770,15 @@ def _add_textbox(slide, text, left, top, width, height,
 
 def _render_text(slide, pos, content: TextContent):
     """Render a text element."""
+    # Determine font: use content's font_name or default to Inter
+    font_name = content.font_name or config.FONT_NAME_PRIMARY
     _add_textbox(
         slide, content.text,
         pos.left, pos.top, pos.width, pos.height,
         font_size=Pt(content.font_size) if content.font_size else config.FONT_BODY,
         bold=content.bold, italic=content.italic,
         color=content.color, alignment=content.alignment,
+        font_name=font_name,
     )
 
 
@@ -786,10 +835,13 @@ def _render_agenda_bullets(slide, pos, items: list[str], font_size, has_tpl: boo
             bold=True,
             alignment=PP_ALIGN.CENTER,
             color_rgb=RGBColor(0xFF, 0xFF, 0xFF),
+            font_name=config.FONT_NAME_PRIMARY,
         )
 
         tx = slide.shapes.add_textbox(x + Emu(420000), y + Emu(100000), card_w - Emu(540000), card_h - Emu(200000))
-        _populate_text_list(tx.text_frame, [item], font_size)
+        # Use JetBrains Mono for code-like items, Inter for normal text
+        item_font = config.FONT_NAME_MONO if _looks_like_code(item) else config.FONT_NAME_PRIMARY
+        _populate_text_list(tx.text_frame, [item], font_size, font_name=item_font)
 
 
 def _render_summary_bullets(slide, pos, items: list[str], font_size, has_tpl: bool) -> None:
@@ -820,7 +872,9 @@ def _render_summary_bullets(slide, pos, items: list[str], font_size, has_tpl: bo
             remove_outline(accent)
 
         tx = slide.shapes.add_textbox(x + Emu(140000), y + Emu(130000), card_w - Emu(280000), card_h - Emu(210000))
-        _populate_text_list(tx.text_frame, [item], font_size)
+        # Use JetBrains Mono for code-like items, Inter for normal text
+        item_font = config.FONT_NAME_MONO if _looks_like_code(item) else config.FONT_NAME_PRIMARY
+        _populate_text_list(tx.text_frame, [item], font_size, font_name=item_font)
 
 
 def _render_content_bullets(slide, pos, items: list[str], font_size, has_tpl: bool) -> None:
@@ -849,6 +903,9 @@ def _render_content_bullets(slide, pos, items: list[str], font_size, has_tpl: bo
     inner_top = pos.top + pad_v + v_offset
     inner_height = inner_height - v_offset
 
+    # Determine font: use JetBrains Mono if any item looks like code, otherwise Inter
+    bullet_font = config.FONT_NAME_MONO if any(_looks_like_code(item) for item in items) else config.FONT_NAME_PRIMARY
+
     split_columns = len(items) >= 5 and pos.width >= Emu(7000000)
     if split_columns:
         gap = Emu(200000)
@@ -856,12 +913,12 @@ def _render_content_bullets(slide, pos, items: list[str], font_size, has_tpl: bo
         midpoint = (len(items) + 1) // 2
         left_box = slide.shapes.add_textbox(inner_left, inner_top, col_width, inner_height)
         right_box = slide.shapes.add_textbox(inner_left + col_width + gap, inner_top, col_width, inner_height)
-        _populate_text_list(left_box.text_frame, items[:midpoint], font_size, prefix="• ")
-        _populate_text_list(right_box.text_frame, items[midpoint:], font_size, prefix="• ")
+        _populate_text_list(left_box.text_frame, items[:midpoint], font_size, prefix="• ", font_name=bullet_font)
+        _populate_text_list(right_box.text_frame, items[midpoint:], font_size, prefix="• ", font_name=bullet_font)
         return
 
     tx = slide.shapes.add_textbox(inner_left, inner_top, inner_width, inner_height)
-    _populate_text_list(tx.text_frame, items, font_size, prefix="• ")
+    _populate_text_list(tx.text_frame, items, font_size, prefix="• ", font_name=bullet_font)
 
 
 # ── Chart rendering ─────────────────────────────────────────────────
@@ -897,6 +954,7 @@ def _render_chart(slide, pos, content: ChartContent,
         chart.has_title = True
         chart.chart_title.text_frame.paragraphs[0].text = content.title
         chart.chart_title.text_frame.paragraphs[0].font.size = Pt(11)
+        chart.chart_title.text_frame.paragraphs[0].font.name = config.FONT_NAME_PRIMARY
         chart.chart_title.text_frame.paragraphs[0].font.bold = True
 
     # Legend — always show for multi-series, and for pie/doughnut
@@ -906,6 +964,7 @@ def _render_chart(slide, pos, content: ChartContent,
         chart.legend.include_in_layout = False
         try:
             chart.legend.font.size = Pt(9)
+            chart.legend.font.name = config.FONT_NAME_PRIMARY
         except Exception:
             pass
 
@@ -923,6 +982,7 @@ def _render_chart(slide, pos, content: ChartContent,
         if show_data_labels:
             data_labels = plot.data_labels
             data_labels.font.size = Pt(9)
+            data_labels.font.name = config.FONT_NAME_MONO
             if content.chart_type in ("pie", "doughnut"):
                 data_labels.number_format = '0%'
                 data_labels.position = XL_LABEL_POSITION.OUTSIDE_END
@@ -940,12 +1000,14 @@ def _render_chart(slide, pos, content: ChartContent,
             cat_axis = chart.category_axis
             cat_axis.has_major_gridlines = False
             cat_axis.tick_labels.font.size = Pt(9)
+            cat_axis.tick_labels.font.name = config.FONT_NAME_PRIMARY
             # Value axis
             val_axis = chart.value_axis
             val_axis.has_major_gridlines = True
             val_axis.major_gridlines.format.line.color.rgb = RGBColor(0xE0, 0xE0, 0xE0)
             val_axis.has_minor_gridlines = False
             val_axis.tick_labels.font.size = Pt(9)
+            val_axis.tick_labels.font.name = config.FONT_NAME_PRIMARY
         except Exception:
             pass  # scatter charts may have different axis structure
 
@@ -996,6 +1058,7 @@ def _render_table(slide, pos, content: TableContent,
         para = cell.text_frame.paragraphs[0]
         para.font.bold = True
         para.font.size = Pt(11)
+        para.font.name = config.FONT_NAME_PRIMARY
         para.alignment = PP_ALIGN.LEFT if col_idx == 0 else PP_ALIGN.CENTER
         cell.fill.solid()
         if has_tpl:
@@ -1017,6 +1080,7 @@ def _render_table(slide, pos, content: TableContent,
                 cell.text = str(value)
                 para = cell.text_frame.paragraphs[0]
                 para.font.size = Pt(10)
+                para.font.name = config.FONT_NAME_PRIMARY
                 para.alignment = PP_ALIGN.LEFT if col_idx == 0 else PP_ALIGN.CENTER
                 # Ultra-light alternating row shading (0.92 brightness)
                 if row_idx % 2 == 0:
@@ -1050,6 +1114,7 @@ def _render_shape(slide, pos, content: ShapeContent):
         tf.auto_size = None
         for para in tf.paragraphs:
             para.font.size = Pt(content.font_size) if content.font_size else config.FONT_BODY
+            para.font.name = config.FONT_NAME_PRIMARY
             if content.bold:
                 para.font.bold = True
             para.alignment = PP_ALIGN.CENTER
@@ -1136,6 +1201,7 @@ def _render_process_flow(slide, pos, items, has_tpl: bool = False):
         cp = ctf.paragraphs[0]
         cp.text = str(i + 1)
         cp.font.size = Pt(12)
+        cp.font.name = config.FONT_NAME_MONO
         cp.font.bold = True
         if has_tpl:
             cp.font.color.theme_color = _FLOW_ACCENTS[i % len(_FLOW_ACCENTS)]
@@ -1161,6 +1227,7 @@ def _render_process_flow(slide, pos, items, has_tpl: bool = False):
         p = tf.paragraphs[0]
         p.text = item.title
         p.font.size = Pt(12)
+        p.font.name = config.FONT_NAME_PRIMARY
         p.font.bold = True
         p.font.color.rgb = _txt_rgb
         p.alignment = PP_ALIGN.CENTER
@@ -1169,6 +1236,7 @@ def _render_process_flow(slide, pos, items, has_tpl: bool = False):
             p2 = tf.add_paragraph()
             p2.text = item.description[:config.MAX_INFOGRAPHIC_DESC]
             p2.font.size = Pt(10)
+            p2.font.name = config.FONT_NAME_PRIMARY
             p2.font.color.rgb = _sub_rgb
             p2.alignment = PP_ALIGN.CENTER
             p2.space_before = Pt(8)
@@ -1227,6 +1295,7 @@ def _render_timeline(slide, pos, items, has_tpl: bool = False):
         p = tf.paragraphs[0]
         p.text = circle_label
         p.font.size = Pt(8 if len(circle_label) > 2 else 10)
+        p.font.name = config.FONT_NAME_MONO
         p.font.bold = True
         p.font.color.rgb = _hex_to_rgb(pick_text_color("2B5797"))
         p.alignment = PP_ALIGN.CENTER
@@ -1257,21 +1326,23 @@ def _render_timeline(slide, pos, items, has_tpl: bool = False):
             _add_textbox(slide, item.value.strip(), cx - label_w // 2, label_y,
                          label_w, Emu(200000),
                          font_size=Pt(11), bold=True, alignment="center",
-                         color="2B5797")
+                         color="2B5797", font_name=config.FONT_NAME_MONO)
             title_y = label_y + Emu(180000)
         else:
             title_y = label_y
 
         _add_textbox(slide, title_text, cx - label_w // 2, title_y,
                      label_w, Emu(350000),
-                     font_size=Pt(10), bold=True, alignment="center")
+                     font_size=Pt(10), bold=True, alignment="center",
+                     font_name=config.FONT_NAME_PRIMARY)
 
         if item.description:
             desc_y = title_y + Emu(300000)
             _add_textbox(slide, item.description[:config.MAX_INFOGRAPHIC_DESC],
                          cx - label_w // 2, desc_y,
                          label_w, Emu(350000),
-                         font_size=Pt(9), alignment="center")
+                         font_size=Pt(9), alignment="center",
+                         font_name=config.FONT_NAME_PRIMARY)
 
 
 def _render_comparison(slide, pos, items, has_tpl: bool = False):
@@ -1317,6 +1388,7 @@ def _render_comparison(slide, pos, items, has_tpl: bool = False):
         p = tf.paragraphs[0]
         p.text = item.title
         p.font.size = Pt(13)
+        p.font.name = config.FONT_NAME_PRIMARY
         p.font.bold = True
         p.font.color.rgb = _ctxt
         p.alignment = PP_ALIGN.CENTER
@@ -1325,6 +1397,7 @@ def _render_comparison(slide, pos, items, has_tpl: bool = False):
             p2 = tf.add_paragraph()
             p2.text = item.description[:config.MAX_CMP_DESC]
             p2.font.size = Pt(10)
+            p2.font.name = config.FONT_NAME_PRIMARY
             p2.font.color.rgb = _csub
             p2.alignment = PP_ALIGN.CENTER
             p2.space_before = Pt(10)
@@ -1333,6 +1406,7 @@ def _render_comparison(slide, pos, items, has_tpl: bool = False):
             p3 = tf.add_paragraph()
             p3.text = item.value
             p3.font.size = Pt(20)
+            p3.font.name = config.FONT_NAME_MONO
             p3.font.bold = True
             p3.font.color.rgb = _ctxt
             p3.alignment = PP_ALIGN.CENTER
@@ -1405,6 +1479,7 @@ def _render_kpi_cards(slide, pos, items, has_tpl: bool = False):
         p = tf.paragraphs[0]
         p.text = item.value or ""
         p.font.size = Pt(34)
+        p.font.name = config.FONT_NAME_MONO
         p.font.bold = True
         p.font.color.rgb = _ktxt
         p.alignment = PP_ALIGN.CENTER
@@ -1422,6 +1497,7 @@ def _render_kpi_cards(slide, pos, items, has_tpl: bool = False):
         p2 = tf.add_paragraph()
         p2.text = item.title
         p2.font.size = Pt(12)
+        p2.font.name = config.FONT_NAME_PRIMARY
         p2.font.color.rgb = _ksub
         p2.alignment = PP_ALIGN.CENTER
         p2.space_before = Pt(4)
@@ -1431,6 +1507,7 @@ def _render_kpi_cards(slide, pos, items, has_tpl: bool = False):
             p3 = tf.add_paragraph()
             p3.text = item.description[:config.MAX_INFOGRAPHIC_DESC]
             p3.font.size = Pt(9)
+            p3.font.name = config.FONT_NAME_PRIMARY
             p3.font.color.rgb = _ksub
             p3.alignment = PP_ALIGN.CENTER
             p3.space_before = Pt(4)
@@ -1484,6 +1561,7 @@ def _render_hierarchy(slide, pos, items, has_tpl: bool = False):
         p = tf.paragraphs[0]
         p.text = item.title
         p.font.size = Pt(12)
+        p.font.name = config.FONT_NAME_PRIMARY
         p.font.bold = True
         p.font.color.rgb = _htxt
         p.alignment = PP_ALIGN.LEFT
@@ -1492,5 +1570,6 @@ def _render_hierarchy(slide, pos, items, has_tpl: bool = False):
             p2 = tf.add_paragraph()
             p2.text = item.description[:config.MAX_INFOGRAPHIC_DESC]
             p2.font.size = Pt(10)
+            p2.font.name = config.FONT_NAME_PRIMARY
             p2.font.color.rgb = _hsub
             p2.space_before = Pt(4)
