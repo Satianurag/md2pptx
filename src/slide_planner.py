@@ -46,7 +46,7 @@ Recommendations > Economic Impact > Summary/Takeaways > Closing
 DROP ORDER (when fewer slides needed): Regional first, then Timeline, Challenges, \
 Methodology, Approach — but ONLY if the content for those roles is weak or missing.
 
-INFOGRAPHIC-FIRST APPROACH (CRITICAL):
+INFOGRAPHIC-FIRST APPROACH (CRITICAL — previous iterations lost points here):
 6. NEVER default to plain "bullets". Always try to visualize content first:
    - Tables with numeric data → "chart" (ALWAYS prefer chart over showing raw table)
    - 3-6 metrics/KPIs → "kpi" (rendered as bold metric cards)
@@ -56,7 +56,8 @@ INFOGRAPHIC-FIRST APPROACH (CRITICAL):
    - Hierarchies, org structures, categories → "infographic" with hierarchy
    - Mixed numeric + text → "mixed" (chart + bullets side-by-side)
    - ONLY use "bullets" as LAST RESORT when content is purely textual with no structure
-   - At LEAST 50%% of content slides (slides 4 through N-2) MUST be chart, infographic, or mixed.
+   - At LEAST 60%% of content slides (slides 4 through N-2) MUST be chart, infographic, \
+     kpi, or mixed. This is a HARD requirement. Audit your plan before emitting it.
 7. When visualization_hint is "chart", you MUST set chart_type_hint to one of: bar, column, line, pie, area, doughnut.
 8. When visualization_hint is "infographic", you MUST set infographic_type_hint to one of: process_flow, timeline, comparison, kpi_cards, hierarchy.
 9. Use section_divider slides sparingly (0-2 max).

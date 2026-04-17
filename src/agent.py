@@ -36,6 +36,8 @@ class PipelineState(TypedDict, total=False):
     presentation_spec: Optional[PresentationSpec]
     output_path: str
     target_slide_count: int
+    presenter: str
+    date_str: str
     errors: list[str]
     warnings: list[str]
     fix_attempts: int
@@ -174,7 +176,12 @@ def generate_spec_node(state: PipelineState) -> dict:
         content_profile=content_profile,
         deck_content=deck_content,
     )
-    logger.info(f"Spec generated: {len(spec.slides)} slides")
+    # Attach cover metadata (presenter + date) to the spec so the renderer can use them
+    spec.presenter = state.get("presenter", "") or ""
+    spec.date_str = state.get("date_str", "") or ""
+    logger.info(f"Spec generated: {len(spec.slides)} slides"
+                + (f", presenter={spec.presenter!r}" if spec.presenter else "")
+                + (f", date={spec.date_str!r}" if spec.date_str else ""))
     return {"presentation_spec": spec}
 
 
@@ -336,8 +343,13 @@ def run_pipeline(
     template_path: str = "",
     output_path: str = "",
     target_slide_count: int = 15,
+    presenter: str = "",
+    date_str: str = "",
 ) -> dict:
-    """Run the full MD → PPTX pipeline. Returns final state dict."""
+    """Run the full MD → PPTX pipeline. Returns final state dict.
+
+    *presenter* and *date_str* populate the cover-slide metadata footer.
+    """
     pipeline = build_pipeline()
 
     initial_state: PipelineState = {
@@ -346,6 +358,8 @@ def run_pipeline(
         "template_path": template_path,
         "output_path": output_path,
         "target_slide_count": target_slide_count,
+        "presenter": presenter,
+        "date_str": date_str,
         "errors": [],
         "warnings": [],
         "fix_attempts": 0,

@@ -33,6 +33,16 @@ def parse_markdown(md_text: str) -> ContentTree:
                 title = heading_text
                 continue
 
+            # A level-3 heading immediately after the H1 title (before any H2)
+            # is conventionally the deck's tagline / subtitle. Capture it.
+            if (
+                level == 3 and title and not subtitle
+                and current_h1 is None and current_h2 is None
+                and len(heading_text) < 220
+            ):
+                subtitle = heading_text
+                continue
+
             if level == 2 and heading_text.lower().startswith('executive summary'):
                 # Next paragraph(s) will be the summary - mark flag
                 current_h1 = ContentSection(heading="Executive Summary", level=2)

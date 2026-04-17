@@ -48,8 +48,16 @@ output/
 ~$*.pptx
 ~$*.ppt
 screenshots
+screenshots_generated/
+screenshots_original/
+qa_screenshots/
 demo
 test_cases
+
+# Local QA / throwaway test scripts (prefix with underscore)
+_test_*.py
+_export_slides.py
+_patch_*.py
 
 
 

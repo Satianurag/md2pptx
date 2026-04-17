@@ -11,7 +11,8 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
-load_dotenv()
+# encoding='utf-8-sig' handles .env files saved with a UTF-8 BOM
+load_dotenv(encoding="utf-8-sig")
 
 logger = logging.getLogger(__name__)
 

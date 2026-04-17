@@ -97,9 +97,16 @@ python main.py --input report.md --template template.pptx --verbose
 
 - **Card-based bullets**: numbered icon circles + card backgrounds (3 shapes/bullet → 18+ shapes for 6 bullets)
 - **Infographic types**: process flow (chevrons + arrows), timeline (circles + alternating labels), comparison cards, KPI metric cards, hierarchy with connectors
+- **Programmatic icon library** (`src/icons.py`): 30+ MSO-shape icons (chart, trend, warning, globe, currency, …) composed from native PowerPoint auto-shapes, keyword-picked per bullet
 - **Slide furniture**: accent underline under title, footer bar with deck title + slide number, left accent stripe
 - **Theme-aware coloring**: all shapes use template theme colors (MSO_THEME_COLOR) for consistency
+- **Contrast-aware accents** (`_pick_readable_accent_hex`): pastel template accents (e.g., `EFF3E5`) are swapped for a WCAG-readable variant when used for large numbers, icons, or footer text against a white slide
+- **Cover metadata contrast**: `Presenter Name: …` / `Date: …` text auto-picks white vs dark based on the cover layout's dark-overlay area (white on the UAE dark-green cover, dark on Accenture pink, dark on AI Bubble white)
+- **Archetype rotation**: consecutive content slides prefer different layouts (sidebar ↔ icon_list ↔ comparison ↔ plain) so 15-slide decks never repeat the same visual twice in a row
+- **Single-bullet enrichment**: slides with one prose bullet are scanned for enumerations (`such as A, B, C`, `in Europe, APAC, and North America`, `A vs B`, colon-lists) and promoted to a multi-item comparison grid — or paired with the slide's key takeaway — before the layout would otherwise fall through to a sparse pull-quote
+- **Numeric abbreviation** (`abbreviate_number`): raw figures like `$865,000,000` → `$865M`, `76,300,000,000,000 USD` → `76.3T USD` in table cells, stat cards, and hero numbers; chart data labels + value-axis ticks use a conditional `K/M/B/T` number format when the series peak ≥ 1M
 - **Smart chart type selection**: pie for single-series, line for time-series, bar for many categories
+- **Log-scale guardrails**: log axes apply only to column/line/area charts when the positive-value range spans >2 orders of magnitude AND the minimum is ≥ 1 — horizontal bar charts always stay linear (avoids tiny-value overflow into the category-label gutter)
 - **Content density**: auto-trim bullets/text to prevent overcrowding (max 4 elements, 800 chars)
 
 ## Project Structure
@@ -117,19 +124,21 @@ md2pptx/
 │   └── verify_output.py   # Automated quality checks (contrast, overflow, structure)
 └── src/
     ├── agent.py           # LangGraph StateGraph + RetryPolicy + rule-based fallback
-    ├── color_utils.py     # WCAG 2.1 contrast utilities, text color picker
+    ├── color_utils.py     # WCAG 2.1 contrast utilities, text colour picker, numeric abbreviation
     ├── components.py      # Card-based bullet rendering, accent shapes
     ├── config.py          # Constants, margins, typography, slide limits
     ├── content_chunker.py # Tiered chunking (standard/moderate/aggressive)
     ├── content_profiler.py # Content archetype detection (financial, narrative, etc.)
+    ├── content_writer.py  # AI bullet/narrative writer (per-slide structured content)
     ├── drawingml_effects.py # Shadows, gradients, rounded corners, card styling
     ├── grid_system.py     # 9-preset grid alignment system
+    ├── icons.py           # Programmatic MSO-shape icon library (30+ native-shape icons)
     ├── llm.py             # Gemini wrapper + rate limiter + structured output
     ├── markdown_parser.py # Mistune markdown → ContentTree
-    ├── pptx_renderer.py   # Rich PPTX renderer (bookends, cards, infographics)
+    ├── pptx_renderer.py   # Rich PPTX renderer (bookends, cards, infographics, contrast-aware)
     ├── schemas.py         # 15+ Pydantic data models
     ├── slide_master.py    # Template reading, theme extraction, fuzzy matching
     ├── slide_planner.py   # AI slide storyline planning
-    ├── spec_generator.py  # Rule-based + AI spec gen, infographic-first, chart-first
+    ├── spec_generator.py  # Rule-based + AI spec gen, archetype rotation, enumeration enrichment
     └── validator.py       # Content density, bounds, chart/table auto-fix
 ```

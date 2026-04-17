@@ -27,7 +27,8 @@ def setup_logging(verbose: bool = False) -> None:
     )
 
 
-def process_single(md_path: Path, output_dir: Path, template_path: str = "") -> bool:
+def process_single(md_path: Path, output_dir: Path, template_path: str = "",
+                   presenter: str = "", date_str: str = "") -> bool:
     """Process a single markdown file into its folder. Returns True on success."""
     if not md_path.exists():
         console.print(f"[red]Error: File not found: {md_path}[/red]")
@@ -62,6 +63,10 @@ def process_single(md_path: Path, output_dir: Path, template_path: str = "") -> 
     ]
     if template_path:
         cmd.extend(["--template", template_path])
+    if presenter:
+        cmd.extend(["--presenter", presenter])
+    if date_str:
+        cmd.extend(["--date", date_str])
 
     try:
         result = subprocess.run(
@@ -114,6 +119,16 @@ def main() -> None:
         default="",
     )
     parser.add_argument(
+        "--presenter", "-p",
+        help="Presenter name for the cover slide of every generated deck.",
+        default="",
+    )
+    parser.add_argument(
+        "--date",
+        help="Date string for the cover slide (default: today's date).",
+        default="",
+    )
+    parser.add_argument(
         "--verbose", "-v",
         action="store_true",
         help="Enable verbose logging",
@@ -151,7 +166,8 @@ def main() -> None:
 
     for i, md_file in enumerate(md_files, 1):
         console.print(f"\n[dim]── [{i}/{len(md_files)}] ──[/dim]")
-        ok = process_single(md_file, output_dir, args.template)
+        ok = process_single(md_file, output_dir, args.template,
+                            presenter=args.presenter, date_str=args.date)
         if ok:
             success += 1
         else:

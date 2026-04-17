@@ -56,6 +56,29 @@ CRITICAL RULES:
 10. For KPI cards: each item needs a label (title) and a numeric value.
 11. Bullet points should NOT start with "The" — use active, direct language.
 12. Avoid filler phrases like "It is important to note that" or "Research shows that".
+
+KPI / INFOGRAPHIC VALUE DISCIPLINE (strict — previous iterations failed here):
+13. A KPI ``value`` MUST be a short metric: a number with optional unit or suffix. \
+    Examples of VALID values: "326", "$6.6B", "51%", "4.34T USD", "+7%", "3x", "2,500". \
+    Examples of INVALID values (REJECTED): "2026-10-01", "2024 Q3", "April 17", \
+    "Several firms announced", full sentences, dates in any format.
+14. If a piece of source evidence is a date (milestone, enactment date, reporting date), \
+    treat it as a TIMELINE event — put the date in an infographic item's ``value`` field \
+    ONLY when visualization_hint is "timeline" or the date is ≤8 characters (e.g. "2024", \
+    "Q3 2025"). For kpi_cards, dates belong in the ``description``, never in ``value``.
+15. For every infographic_item, keep ``title`` ≤ 8 words and ``description`` ≤ 18 words.
+16. NEVER repeat the ``value`` inside the ``description`` of the same item.
+
+CHART DATA DISCIPLINE:
+17. If a slide has a chart (visualization_hint == "chart" / "mixed"), ensure the source \
+    table has at least 2 numeric, non-identical values across 2+ distinct categories. \
+    If the only candidate table has all-equal values or a single row, do NOT plan a chart; \
+    downgrade the visualization_hint to "bullets" or "infographic".
+18. Chart category labels must be unique AND descriptive. Avoid generic labels like \
+    "Period" or "Metric" for the first column — prefer the actual entity name \
+    ("Q3 2024", "US private AI", "NVIDIA").
+19. For time-series data (years, quarters, dates in the first column), prefer chart_type \
+    "line" (up to 3 series) or "area" (4+ series). Never "pie" or "bar" for time series.
 """
 
 

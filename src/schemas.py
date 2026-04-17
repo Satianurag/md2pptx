@@ -65,6 +65,8 @@ class ChartContent(BaseModel):
     title: Optional[str] = None
     categories: list[str] = Field(default_factory=list)
     series: list[ChartSeries] = Field(default_factory=list)
+    # True → value axis should be logarithmic (set when values span >2 orders of magnitude)
+    log_scale: bool = False
 
 class ChartSeries(BaseModel):
     name: str
@@ -84,7 +86,15 @@ class ShapeContent(BaseModel):
     bold: bool = False
 
 class InfographicContent(BaseModel):
-    infographic_type: Literal["process_flow", "timeline", "comparison", "kpi_cards", "hierarchy"]
+    infographic_type: Literal[
+        # Existing archetypes
+        "process_flow", "timeline", "comparison", "kpi_cards", "hierarchy",
+        # New archetypes added in visual-overhaul iteration
+        "icon_list",        # icon + title + description rows (replaces monotonous numbered cards)
+        "stat_grid",        # 3-4 hero metrics in a clean grid
+        "hero_number",      # single giant metric + narrative sidebar
+        "pull_quote",       # editorial quote with attribution
+    ]
     items: list[InfographicItem] = Field(default_factory=list)
 
 class InfographicItem(BaseModel):
@@ -125,6 +135,8 @@ class PresentationSpec(BaseModel):
     slides: list[SlideSpec] = Field(default_factory=list)
     template_path: str = ""
     target_slide_count: int = 15
+    presenter: str = ""          # Presenter name for cover slide footer
+    date_str: str = ""           # Date string for cover slide footer (e.g. "April 17, 2026")
 
 
 # ── Slide master metadata ───────────────────────────────────────────
