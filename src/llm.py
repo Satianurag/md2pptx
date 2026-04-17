@@ -11,24 +11,10 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
-load_dotenv()
+# encoding='utf-8-sig' handles .env files saved with a UTF-8 BOM
+load_dotenv(encoding="utf-8-sig")
 
 logger = logging.getLogger(__name__)
-
-
-def _extract_text(content) -> str:
-    """Extract plain text from LLM response content (may be str or list of dicts)."""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts = []
-        for item in content:
-            if isinstance(item, dict) and "text" in item:
-                parts.append(item["text"])
-            elif isinstance(item, str):
-                parts.append(item)
-        return "\n".join(parts)
-    return str(content)
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -111,12 +97,13 @@ def get_llm() -> ChatGoogleGenerativeAI:
     if _llm_instance is None:
         with _init_lock:
             if _llm_instance is None:
+                model_name = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite-preview")
                 _llm_instance = ChatGoogleGenerativeAI(
-                    model="gemini-3.1-flash-lite-preview",
+                    model=model_name,
                     google_api_key=_get_api_key(),
                     temperature=0.3,
-                    max_output_tokens=16384,
                 )
+                logger.info(f"LLM initialized: model={model_name}")
     return _llm_instance
 
 
@@ -128,47 +115,6 @@ def get_rate_limiter() -> RateLimiter:
             if _rate_limiter is None:
                 _rate_limiter = RateLimiter()
     return _rate_limiter
-
-
-def invoke_llm(
-    system_prompt: str,
-    user_prompt: str,
-    estimated_tokens: int = 5000,
-) -> str:
-    """Invoke the LLM with rate limiting and retry logic. Returns raw text."""
-    llm = get_llm()
-    limiter = get_rate_limiter()
-
-    messages = [
-        SystemMessage(content=system_prompt),
-        HumanMessage(content=user_prompt),
-    ]
-
-    for attempt in range(MAX_RETRIES):
-        try:
-            limiter.wait_if_needed(estimated_tokens)
-            response = llm.invoke(messages)
-
-            # Record actual token usage if available
-            usage = getattr(response, "usage_metadata", None)
-            if usage:
-                total = usage.get("total_tokens", estimated_tokens) if isinstance(usage, dict) else getattr(usage, "total_tokens", estimated_tokens)
-                limiter.record_tokens(total)
-            else:
-                limiter.record_tokens(estimated_tokens)
-
-            return _extract_text(response.content)
-
-        except Exception as e:
-            delay = RETRY_BASE_DELAY * (2 ** attempt)
-            logger.warning(f"LLM call failed (attempt {attempt + 1}/{MAX_RETRIES}): {e}")
-            if attempt < MAX_RETRIES - 1:
-                logger.info(f"Retrying in {delay:.1f}s...")
-                time.sleep(delay)
-            else:
-                raise RuntimeError(f"LLM call failed after {MAX_RETRIES} attempts: {e}") from e
-
-    return ""  # unreachable
 
 
 def invoke_llm_structured(

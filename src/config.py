@@ -31,6 +31,11 @@ def _find_hackathon_dir(subfolder: str) -> Path | None:
 
 
 def find_templates_dir() -> Path | None:
+    # Use local templates directory instead of hackathon folder
+    local_templates = PROJECT_ROOT / "templates"
+    if local_templates.exists() and local_templates.is_dir():
+        return local_templates
+    # Fallback to hackathon folder search
     return _find_hackathon_dir("Slide Master")
 
 
@@ -65,6 +70,10 @@ FONT_BODY = Pt(13)
 FONT_CAPTION = Pt(10)
 FONT_LABEL = Pt(11)
 
+# --- Font Families ---
+FONT_NAME_PRIMARY = "Inter"        # Primary sans-serif for all regular text
+FONT_NAME_MONO = "JetBrains Mono"  # Monospace for code and technical content
+
 # --- Text frame internal padding (EMU) ---
 # Generous padding prevents text from touching shape edges
 TF_MARGIN_LEFT = Emu(120000)    # ~0.13 inches
@@ -79,6 +88,26 @@ PARA_SPACE_AFTER = Pt(4)        # subtle trailing space
 # --- Slide count ---
 MIN_SLIDES = 10
 MAX_SLIDES = 15
+DEFAULT_SLIDE_COUNT = 15
+
+# --- Narrative roles (reference list — AI decides dynamically which to use) ---
+NARRATIVE_ROLES: list[str] = [
+    "cover",
+    "agenda",
+    "executive_summary",
+    "market_landscape",
+    "methodology",
+    "key_findings",
+    "data_evidence",
+    "timeline_roadmap",
+    "case_study",
+    "regional_analysis",
+    "challenges_risks",
+    "recommendations",
+    "impact_analysis",
+    "conclusion",
+    "thank_you",
+]
 
 # --- Layout name mapping (normalized) ---
 LAYOUT_COVER = "cover"

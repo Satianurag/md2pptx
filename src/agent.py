@@ -4,15 +4,15 @@ from pathlib import Path
 from typing import TypedDict, Optional, Any
 
 from langgraph.graph import StateGraph, START, END
-from langgraph.types import RetryPolicy
 
 from .schemas import (
-    ContentTree, SlideMasterInfo, SlidePlan, PresentationSpec,
+    ContentTree, SlideMasterInfo, SlidePlan, PresentationSpec, DeckContent,
 )
 from .markdown_parser import parse_markdown
 from .slide_master import read_slide_master, auto_detect_template
 from .slide_planner import plan_slides
 from .spec_generator import generate_presentation_spec
+from .content_writer import write_deck_content, fix_deck_content
 from .validator import validate_and_fix, ValidationResult
 from .pptx_renderer import render_presentation
 from .content_chunker import chunk_content_tree
@@ -32,12 +32,15 @@ class PipelineState(TypedDict, total=False):
     template_path: str
     master_info: Optional[SlideMasterInfo]
     slide_plan: Optional[SlidePlan]
+    deck_content: Optional[DeckContent]
     presentation_spec: Optional[PresentationSpec]
     output_path: str
     target_slide_count: int
+    presenter: str
+    date_str: str
     errors: list[str]
     warnings: list[str]
-    retry_count: int
+    fix_attempts: int
     validation_result: Optional[ValidationResult]
 
 
@@ -84,21 +87,21 @@ def profile_content_node(state: PipelineState) -> dict:
 
 
 def analyze_template_node(state: PipelineState) -> dict:
-    """Read template and extract layout metadata."""
+    """Read template and extract layout metadata. Fails fast if no template is provided."""
     logger.info("Node: analyze_template")
 
     template_path = state.get("template_path", "")
-    md_path = state.get("md_path", "")
 
-    # Auto-detect template if not provided
-    if not template_path and md_path:
-        detected = auto_detect_template(md_path)
-        if detected:
-            template_path = str(detected)
-            logger.info(f"Auto-detected template: {detected.name}")
+    if not template_path:
+        return {
+            "errors": state.get("errors", []) + [
+                "No template provided. --template/-t is required."
+            ]
+        }
+
 
     master_info = None
-    if template_path and Path(template_path).exists():
+    if Path(template_path).exists():
         try:
             master_info = read_slide_master(template_path)
             logger.info(f"Template loaded: {len(master_info.layouts)} layouts")
@@ -106,15 +109,19 @@ def analyze_template_node(state: PipelineState) -> dict:
             logger.warning(f"Failed to read template: {e}")
             template_path = ""
     else:
-        if template_path:
-            logger.warning(f"Template not found: {template_path}")
-        template_path = ""
+        logger.warning(f"Template not found: {template_path}")
+        return {
+            "errors": state.get("errors", []) + [
+                f"Template file not found: {template_path}"
+            ]
+        }
 
     return {"template_path": template_path, "master_info": master_info}
 
 
+
 def plan_slides_node(state: PipelineState) -> dict:
-    """Use LLM to generate slide plan."""
+    """Use LLM to generate slide plan — AI decides narrative dynamically."""
     logger.info("Node: plan_slides")
 
     content_tree = state.get("content_tree")
@@ -122,47 +129,60 @@ def plan_slides_node(state: PipelineState) -> dict:
         return {"errors": state.get("errors", []) + ["No content_tree available for planning"]}
 
     master_info = state.get("master_info")
-    target = state.get("target_slide_count", 12)
-
+    target = state.get("target_slide_count", config.DEFAULT_SLIDE_COUNT)
     content_profile = state.get("content_profile")
 
-    try:
-        slide_plan = plan_slides(content_tree, master_info, target, content_profile)
-        logger.info(f"Plan: {len(slide_plan.slides)} slides, storyline: {slide_plan.storyline_summary[:80]}...")
-        return {"slide_plan": slide_plan}
-    except Exception as e:
-        logger.warning(f"LLM planning failed ({e}), using rule-based fallback")
-        slide_plan = _rule_based_plan_fallback(content_tree, target)
-        return {"slide_plan": slide_plan}
+    slide_plan = plan_slides(content_tree, master_info, target, content_profile)
+    logger.info(f"Plan: {len(slide_plan.slides)} slides, storyline: {slide_plan.storyline_summary[:80]}...")
+    return {"slide_plan": slide_plan}
+
+
+def write_content_node(state: PipelineState) -> dict:
+    """Use LLM to write presentation-ready content for all slides."""
+    logger.info("Node: write_content")
+
+    slide_plan = state.get("slide_plan")
+    content_tree = state.get("content_tree")
+    content_profile = state.get("content_profile")
+
+    if not slide_plan or not content_tree:
+        return {"errors": state.get("errors", []) + ["Missing slide_plan or content_tree for content writing"]}
+
+    deck_content = write_deck_content(slide_plan, content_tree, content_profile)
+    logger.info(f"Content written: {len(deck_content.slides)} slides")
+    return {"deck_content": deck_content}
 
 
 def generate_spec_node(state: PipelineState) -> dict:
-    """Generate full PresentationSpec from plan."""
+    """Generate full PresentationSpec from plan + AI-written content."""
     logger.info("Node: generate_spec")
 
     content_tree = state.get("content_tree")
     slide_plan = state.get("slide_plan")
     master_info = state.get("master_info")
     template_path = state.get("template_path", "")
+    deck_content = state.get("deck_content")
 
     if not content_tree or not slide_plan:
         return {"errors": state.get("errors", []) + ["Missing content_tree or slide_plan"]}
 
     content_profile = state.get("content_profile")
 
-    try:
-        spec = generate_presentation_spec(
-            content_tree=content_tree,
-            slide_plan=slide_plan,
-            master_info=master_info,
-            template_path=template_path,
-            content_profile=content_profile,
-        )
-        logger.info(f"Spec generated: {len(spec.slides)} slides")
-        return {"presentation_spec": spec}
-    except Exception as e:
-        logger.error(f"Spec generation failed: {e}")
-        return {"errors": state.get("errors", []) + [f"Spec generation failed: {e}"]}
+    spec = generate_presentation_spec(
+        content_tree=content_tree,
+        slide_plan=slide_plan,
+        master_info=master_info,
+        template_path=template_path,
+        content_profile=content_profile,
+        deck_content=deck_content,
+    )
+    # Attach cover metadata (presenter + date) to the spec so the renderer can use them
+    spec.presenter = state.get("presenter", "") or ""
+    spec.date_str = state.get("date_str", "") or ""
+    logger.info(f"Spec generated: {len(spec.slides)} slides"
+                + (f", presenter={spec.presenter!r}" if spec.presenter else "")
+                + (f", date={spec.date_str!r}" if spec.date_str else ""))
+    return {"presentation_spec": spec}
 
 
 def validate_node(state: PipelineState) -> dict:
@@ -218,93 +238,99 @@ def render_node(state: PipelineState) -> dict:
         return {"errors": state.get("errors", []) + [f"Rendering failed: {e}"]}
 
 
-# ── Conditional edge ──
+# ── Conditional edges ──
 
-def should_render(state: PipelineState) -> str:
-    """Decide whether to render or report errors."""
+def should_render_or_fix(state: PipelineState) -> str:
+    """After validation: render if pass, fix_content if fixable, error if fatal."""
     errors = state.get("errors", [])
     if errors:
         return "error"
+
+    vr = state.get("validation_result")
+    if vr and not vr.passed:
+        # Allow 1 fix attempt
+        if state.get("fix_attempts", 0) < 1:
+            return "fix_content"
+        return "error"
+
     return "render"
 
 
+def fix_content_node(state: PipelineState) -> dict:
+    """Ask AI to fix content issues flagged by validation."""
+    logger.info("Node: fix_content")
+
+    deck_content = state.get("deck_content")
+    vr = state.get("validation_result")
+
+    if not deck_content or not vr:
+        return {"errors": state.get("errors", []) + ["No content/validation to fix"]}
+
+    issues = vr.errors + vr.warnings
+    fixed = fix_deck_content(deck_content, issues)
+
+    return {
+        "deck_content": fixed,
+        "fix_attempts": state.get("fix_attempts", 0) + 1,
+    }
+
+
 def error_node(state: PipelineState) -> dict:
-    """Handle pipeline errors gracefully."""
+    """Handle pipeline errors."""
     errors = state.get("errors", [])
     logger.error(f"Pipeline failed with {len(errors)} errors: {errors}")
     return state
 
 
-def _rule_based_plan_fallback(tree: ContentTree, target: int = 12) -> SlidePlan:
-    """Generate a slide plan without LLM when the planner fails."""
-    from .schemas import SlidePlan, SlidePlanItem
-    slides = [SlidePlanItem(slide_number=1, slide_type="cover", title=tree.title or "Presentation",
-                            subtitle=tree.subtitle)]
-    idx = 2
-    # Agenda slide
-    slides.append(SlidePlanItem(slide_number=idx, slide_type="agenda",
-                                title="Agenda", visualization_hint="bullets"))
-    idx += 1
-    if tree.executive_summary:
-        slides.append(SlidePlanItem(slide_number=idx, slide_type="executive_summary",
-                                    title="Executive Summary", visualization_hint="bullets"))
-        idx += 1
-    # Section slides
-    max_sections = min(len(tree.sections), target - 4)  # reserve cover + agenda + conclusion + thank_you
-    for sec in tree.sections[:max_sections]:
-        hint = "bullets"
-        if sec.tables:
-            hint = "chart"
-        elif sec.metrics and len(sec.metrics) >= 3:
-            hint = "kpi"
-        slides.append(SlidePlanItem(
-            slide_number=idx, slide_type="content", title=sec.heading,
-            content_source=[sec.heading], visualization_hint=hint,
-            key_message=sec.text[:100] if sec.text else "",
-        ))
-        idx += 1
-    slides.append(SlidePlanItem(slide_number=idx, slide_type="conclusion",
-                                title="Conclusion & Key Takeaways", visualization_hint="bullets"))
-    idx += 1
-    slides.append(SlidePlanItem(slide_number=idx, slide_type="thank_you", title="Thank You"))
-    logger.info(f"Rule-based plan: {len(slides)} slides")
-    return SlidePlan(storyline_summary="Auto-generated from section structure",
-                     target_slide_count=len(slides), slides=slides)
-
-
 # ── Build the graph ──
 
 def build_pipeline() -> StateGraph:
-    """Build and compile the LangGraph pipeline."""
-    workflow = StateGraph(PipelineState)
+    """Build and compile the LangGraph pipeline.
 
-    # Retry policy for LLM nodes (exponential backoff)
-    llm_retry = RetryPolicy(
-        initial_interval=2.0,
-        backoff_factor=2.0,
-        max_interval=30.0,
-        max_attempts=3,
-        jitter=True,
-    )
+    Graph:
+      START → parse_md → ┌─ profile_content ─┐
+                        │                    ├→ plan_slides → write_content → generate_spec → validate
+                        └─ analyze_template ─┘
+      validate → render | fix_content → generate_spec | error
+    """
+    workflow = StateGraph(PipelineState)
 
     # Add nodes
     workflow.add_node("parse_md", parse_md_node)
     workflow.add_node("profile_content", profile_content_node)
     workflow.add_node("analyze_template", analyze_template_node)
-    workflow.add_node("plan_slides", plan_slides_node, retry=llm_retry)
-    workflow.add_node("generate_spec", generate_spec_node, retry=llm_retry)
+    workflow.add_node("plan_slides", plan_slides_node)
+    workflow.add_node("write_content", write_content_node)
+    workflow.add_node("generate_spec", generate_spec_node)
     workflow.add_node("validate", validate_node)
+    workflow.add_node("fix_content", fix_content_node)
     workflow.add_node("render", render_node)
     workflow.add_node("error", error_node)
 
-    # Add edges
+    # Edges: parse_md fans out to profile + template (parallel)
     workflow.add_edge(START, "parse_md")
     workflow.add_edge("parse_md", "profile_content")
-    workflow.add_edge("profile_content", "analyze_template")
+    workflow.add_edge("parse_md", "analyze_template")
+
+    # Both must complete before planning (fan-in)
+    workflow.add_edge("profile_content", "plan_slides")
     workflow.add_edge("analyze_template", "plan_slides")
-    workflow.add_edge("plan_slides", "generate_spec")
+
+    # Sequential: plan → write → spec → validate
+    workflow.add_edge("plan_slides", "write_content")
+    workflow.add_edge("write_content", "generate_spec")
     workflow.add_edge("generate_spec", "validate")
-    workflow.add_conditional_edges("validate", should_render, {"render": "render", "error": "error"})
+
+    # Conditional: pass → render, fail → fix_content, fatal → error
+    workflow.add_conditional_edges("validate", should_render_or_fix, {
+        "render": "render",
+        "fix_content": "fix_content",
+        "error": "error",
+    })
+
+    # Fix loop: fix_content → generate_spec (re-enters validate)
+    workflow.add_edge("fix_content", "generate_spec")
+
     workflow.add_edge("render", END)
     workflow.add_edge("error", END)
 
@@ -316,9 +342,14 @@ def run_pipeline(
     md_path: str = "",
     template_path: str = "",
     output_path: str = "",
-    target_slide_count: int = 12,
+    target_slide_count: int = 15,
+    presenter: str = "",
+    date_str: str = "",
 ) -> dict:
-    """Run the full MD → PPTX pipeline. Returns final state dict."""
+    """Run the full MD → PPTX pipeline. Returns final state dict.
+
+    *presenter* and *date_str* populate the cover-slide metadata footer.
+    """
     pipeline = build_pipeline()
 
     initial_state: PipelineState = {
@@ -327,9 +358,11 @@ def run_pipeline(
         "template_path": template_path,
         "output_path": output_path,
         "target_slide_count": target_slide_count,
+        "presenter": presenter,
+        "date_str": date_str,
         "errors": [],
         "warnings": [],
-        "retry_count": 0,
+        "fix_attempts": 0,
     }
 
     result = pipeline.invoke(initial_state)

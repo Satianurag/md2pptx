@@ -3,9 +3,25 @@
 from __future__ import annotations
 import argparse
 import logging
+import os
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
+
+# Reconfigure stdout/stderr to UTF-8 BEFORE any rich imports so the Braille
+# spinner characters emitted by Rich's Progress don't crash the Windows
+# cp1252 codec on ``__exit__``.
+if sys.stdout and hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+if sys.stderr and hasattr(sys.stderr, "reconfigure"):
+    try:
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 from rich.console import Console
 from rich.logging import RichHandler
@@ -13,17 +29,53 @@ from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from dotenv import load_dotenv
 
-load_dotenv()
+# encoding='utf-8-sig' strips a BOM if present (saves common-mistake debugging)
+load_dotenv(encoding="utf-8-sig")
 
 from src.agent import run_pipeline
 from src import config
 
-console = Console()
+# legacy_windows=False forces Rich to use ANSI escape codes rather than the
+# Win32 console API, which avoids cp1252 charmap_encode crashes on Unicode
+# spinner glyphs.
+console = Console(legacy_windows=False)
+
+
+def _resolve_presenter(cli_value: str = "") -> str:
+    """Resolve presenter name with fallback chain.
+
+    Priority: (1) CLI ``--presenter`` arg, (2) ``PRESENTER_NAME`` env var,
+    (3) Windows ``os.getlogin()``, (4) empty string.
+    """
+    cli_value = (cli_value or "").strip()
+    if cli_value:
+        return cli_value
+    env_val = os.environ.get("PRESENTER_NAME", "").strip()
+    if env_val:
+        return env_val
+    try:
+        user = os.getlogin()
+        if user:
+            return user
+    except Exception:
+        pass
+    return ""
+
+
+def _resolve_date(cli_value: str = "") -> str:
+    """Resolve the cover slide date string. CLI override > today's date."""
+    cli_value = (cli_value or "").strip()
+    if cli_value:
+        return cli_value
+    return datetime.now().strftime("%B %d, %Y")
 
 
 def _auto_slide_count(file_size_bytes: int, md_text: str | None = None) -> int:
     """Pick a target slide count (10-15) using content profiling when available,
-    falling back to file-size heuristic otherwise."""
+    falling back to file-size heuristic otherwise.
+
+    Default bias: 15 slides (2026 standard).  Only go lower if content is genuinely thin.
+    """
     if md_text:
         try:
             from src.markdown_parser import parse_markdown
@@ -32,8 +84,8 @@ def _auto_slide_count(file_size_bytes: int, md_text: str | None = None) -> int:
             prof = profile_content(tree)
             # Base: 4 structural slides (cover + agenda + conclusion + thank_you)
             base = 4
-            # Add 1 slide per section, capped at 9 content slides
-            section_slides = min(prof.total_sections, 9)
+            # Add 1 slide per section, capped at 11 content slides
+            section_slides = min(prof.total_sections, 11)
             # Bonus slides for data-rich content
             bonus = 0
             if prof.total_tables >= 3:
@@ -45,16 +97,15 @@ def _auto_slide_count(file_size_bytes: int, md_text: str | None = None) -> int:
         except Exception:
             pass  # fall back to size-based
 
+    # File-size heuristic — biased toward 15
     kb = file_size_bytes / 1024
-    if kb < 30:
+    if kb < 15:
         return 10
-    elif kb < 100:
-        return 11
-    elif kb < 300:
+    elif kb < 30:
         return 12
-    elif kb < 600:
+    elif kb < 60:
         return 13
-    elif kb < 1500:
+    elif kb < 150:
         return 14
     else:
         return 15
@@ -78,7 +129,9 @@ def process_single(
     md_path: str,
     template_path: str = "",
     output_path: str = "",
-    target_slides: int = 12,
+    target_slides: int = 15,
+    presenter: str = "",
+    date_str: str = "",
 ) -> bool:
     """Process a single markdown file. Returns True on success."""
     md_file = Path(md_path)
@@ -91,12 +144,13 @@ def process_single(
     if size_mb > 5:
         console.print(f"[yellow]Warning: Large file ({size_mb:.1f}MB). Aggressive chunking will be applied.[/yellow]")
 
-    console.print(Panel(
-        f"[bold]{md_file.name}[/bold]\n"
+    panel_lines = [
+        f"[bold]{md_file.name}[/bold]",
         f"Size: {size_mb:.2f} MB | Target slides: {target_slides}",
-        title="Processing",
-        border_style="blue",
-    ))
+    ]
+    if presenter or date_str:
+        panel_lines.append(f"Presenter: {presenter or '(empty)'} | Date: {date_str or '(empty)'}")
+    console.print(Panel("\n".join(panel_lines), title="Processing", border_style="blue"))
 
     md_text = md_file.read_text(encoding="utf-8", errors="replace")
 
@@ -115,6 +169,8 @@ def process_single(
             template_path=template_path,
             output_path=output_path,
             target_slide_count=target_slides,
+            presenter=presenter,
+            date_str=date_str,
         )
 
         progress.update(task, description="Done")
@@ -143,7 +199,9 @@ def process_single(
 def process_batch(
     input_dir: str,
     template_path: str = "",
-    target_slides: int = 12,
+    target_slides: int = 15,
+    presenter: str = "",
+    date_str: str = "",
 ) -> None:
     """Process all .md files in a directory."""
     md_dir = Path(input_dir)
@@ -168,7 +226,6 @@ def process_batch(
     for i, md_file in enumerate(md_files, 1):
         console.print(f"\n[dim]── [{i}/{len(md_files)}] ──[/dim]")
         out_path = str(config.OUTPUT_DIR / f"{md_file.stem}.pptx")
-        # Auto-calculate slide count per file if target_slides is 0 (auto mode)
         if target_slides > 0:
             slides = target_slides
         else:
@@ -179,6 +236,8 @@ def process_batch(
             template_path=template_path,
             output_path=out_path,
             target_slides=slides,
+            presenter=presenter,
+            date_str=date_str,
         )
         if ok:
             success += 1
@@ -195,13 +254,13 @@ def main() -> None:
     )
     parser.add_argument(
         "--input", "-i",
-        help="Path to markdown file (or directory for --batch)",
+        help="Path to markdown file to convert.",
         required=True,
     )
     parser.add_argument(
         "--template", "-t",
-        help="Path to .pptx template (auto-detected if omitted)",
-        default="",
+        help="Path to a .pptx template file. Required.",
+        required=True,
     )
     parser.add_argument(
         "--output", "-o",
@@ -211,13 +270,19 @@ def main() -> None:
     parser.add_argument(
         "--slides", "-s",
         type=int,
-        default=12,
-        help="Target slide count (10-15, default: 12). Use 0 for auto-detection based on file size.",
+        default=15,
+        help="Number of slides to generate (10–15, default: 15).",
+    )
+
+    parser.add_argument(
+        "--presenter", "-p",
+        help="Presenter name for the cover slide (fallback: PRESENTER_NAME env var, then OS user).",
+        default="",
     )
     parser.add_argument(
-        "--batch", "-b",
-        action="store_true",
-        help="Process all .md files in the input directory",
+        "--date",
+        help="Date string for the cover slide (default: today in 'Month DD, YYYY' format).",
+        default="",
     )
     parser.add_argument(
         "--verbose", "-v",
@@ -229,18 +294,24 @@ def main() -> None:
 
     setup_logging(args.verbose)
 
-    # Clamp slide count (0 = auto mode for batch)
-    if args.slides != 0:
-        args.slides = max(config.MIN_SLIDES, min(config.MAX_SLIDES, args.slides))
+    # Validate slide count
+    if not (config.MIN_SLIDES <= args.slides <= config.MAX_SLIDES):
+        parser.error(
+            f"--slides must be between {config.MIN_SLIDES} and {config.MAX_SLIDES} "
+            f"(got {args.slides}). Default is {config.DEFAULT_SLIDE_COUNT}."
+        )
 
     # Ensure output directory exists
     config.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    if args.batch:
-        process_batch(args.input, args.template, args.slides)
-    else:
-        ok = process_single(args.input, args.template, args.output, args.slides)
-        sys.exit(0 if ok else 1)
+    presenter = _resolve_presenter(args.presenter)
+    date_str = _resolve_date(args.date)
+
+    ok = process_single(
+        args.input, args.template, args.output, args.slides,
+        presenter=presenter, date_str=date_str,
+    )
+    sys.exit(0 if ok else 1)
 
 
 if __name__ == "__main__":

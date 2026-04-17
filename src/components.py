@@ -128,6 +128,7 @@ def render_kpi_card(
     p = tf.paragraphs[0]
     p.text = value
     p.font.size = Pt(30)
+    p.font.name = config.FONT_NAME_MONO
     p.font.bold = True
     p.font.color.rgb = txt_rgb
     p.alignment = PP_ALIGN.CENTER
@@ -136,6 +137,7 @@ def render_kpi_card(
     p2 = tf.add_paragraph()
     p2.text = label
     p2.font.size = Pt(12)
+    p2.font.name = config.FONT_NAME_PRIMARY
     p2.font.color.rgb = sub_rgb
     p2.alignment = PP_ALIGN.CENTER
     p2.space_before = Pt(10)
@@ -145,6 +147,7 @@ def render_kpi_card(
         p3 = tf.add_paragraph()
         p3.text = description[:config.MAX_INFOGRAPHIC_DESC]
         p3.font.size = Pt(9)
+        p3.font.name = config.FONT_NAME_PRIMARY
         p3.font.color.rgb = sub_rgb
         p3.alignment = PP_ALIGN.CENTER
 
@@ -192,6 +195,7 @@ def render_content_card(
     hp = htf.paragraphs[0]
     hp.text = title
     hp.font.size = Pt(14)
+    hp.font.name = config.FONT_NAME_PRIMARY
     hp.font.bold = True
     hp.font.color.rgb = _fg_color_for_accent(accent_idx, has_tpl)
     hp.alignment = PP_ALIGN.LEFT
@@ -212,6 +216,7 @@ def render_content_card(
             p = tf.paragraphs[0] if idx == 0 else tf.add_paragraph()
             p.text = f"• {item}"
             p.font.size = Pt(11)
+            p.font.name = config.FONT_NAME_PRIMARY
             p.alignment = PP_ALIGN.LEFT
             if idx > 0:
                 p.space_before = Pt(6)
@@ -253,6 +258,7 @@ def render_stat_callout(
     p = tf.paragraphs[0]
     p.text = number
     p.font.size = Pt(16)
+    p.font.name = config.FONT_NAME_MONO
     p.font.bold = True
     p.font.color.rgb = _fg_color_for_accent(accent_idx, has_tpl)
     p.alignment = PP_ALIGN.CENTER
@@ -267,6 +273,7 @@ def render_stat_callout(
         lp = ltf.paragraphs[0]
         lp.text = label
         lp.font.size = Pt(9)
+        lp.font.name = config.FONT_NAME_PRIMARY
         lp.alignment = PP_ALIGN.CENTER
 
 
@@ -319,6 +326,7 @@ def render_numbered_circle(
     p = tf.paragraphs[0]
     p.text = f"{number:02d}"
     p.font.size = Pt(10)
+    p.font.name = config.FONT_NAME_MONO
     p.font.bold = True
     p.font.color.rgb = _fg_color_for_accent(accent_idx, has_tpl)
     p.alignment = PP_ALIGN.CENTER
@@ -387,6 +395,7 @@ def render_section_badge(
     p = tf.paragraphs[0]
     p.text = section_text
     p.font.size = Pt(10)
+    p.font.name = config.FONT_NAME_PRIMARY
     p.font.bold = True
     p.font.color.rgb = _fg_color_for_accent(accent_idx, has_tpl)
     p.alignment = PP_ALIGN.CENTER

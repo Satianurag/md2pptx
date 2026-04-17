@@ -365,3 +365,182 @@ def _score_metric(m: KeyMetric) -> ScoredMetric:
         score += 1
 
     return ScoredMetric(metric=m, score=score)
+
+
+# ---------------------------------------------------------------------------
+# Narrative role classification (pure Python, no LLM)
+# ---------------------------------------------------------------------------
+
+_ROLE_PATTERNS: list[tuple[str, re.Pattern]] = [
+    ("executive_summary", re.compile(
+        r"\b(executive\s+summary|overview|abstract|key\s+highlights|at\s+a\s+glance)\b", re.I)),
+    ("market_landscape", re.compile(
+        r"\b(market\s+(overview|landscape|opportunity|size|analysis|dynamics|context)"
+        r"|industry\s+(overview|landscape|analysis)|current\s+(landscape|state|market)"
+        r"|competitive\s+landscape|sector\s+overview)\b", re.I)),
+    ("methodology", re.compile(
+        r"\b(methodo|research\s+design|approach|framework|sampling|data\s+collection"
+        r"|analytical\s+framework|study\s+design|research\s+scope)\b", re.I)),
+    ("timeline_roadmap", re.compile(
+        r"\b(timeline|roadmap|future\s+outlook|forecast|projection|outlook"
+        r"|phased?\s+plan|implementation\s+timeline|20\d{2}\s*[-–]\s*20\d{2})\b", re.I)),
+    ("case_study", re.compile(
+        r"\b(case\s+stud|real[\s-]world\s+example|success\s+stor|proof\s+of\s+concept"
+        r"|toyota|nissan|pfizer|schneider|company\s+profile)\b", re.I)),
+    ("regional_analysis", re.compile(
+        r"\b(regional\s+(analysis|deep\s+dive|overview|breakdown|focus)"
+        r"|middle\s+east|NCR|europe|asia|india|UAE|GCC|country[\s-]specific"
+        r"|geographic|local\s+market)\b", re.I)),
+    ("challenges_risks", re.compile(
+        r"\b(challeng|risk\s*(assessment|analysis|factor)?|barrier|limitation|SWOT"
+        r"|threat|obstacle|constraint|gap\s+analysis|vulnerabilit)\b", re.I)),
+    ("recommendations", re.compile(
+        r"\b(recommend|strategic\s+(guidance|imperative|direction)|action\s+item"
+        r"|next\s+step|implementation\s+plan|policy\s+implication|call\s+to\s+action"
+        r"|strategic\s+action)\b", re.I)),
+    ("impact_analysis", re.compile(
+        r"\b(economic\s+impact|GDP\s+contribution|ROI\s+analysis|cost[\s-]benefit"
+        r"|job\s+creation|financial\s+impact|impact\s+assessment|multiplier\s+effect"
+        r"|value\s+creation)\b", re.I)),
+    ("data_evidence", re.compile(
+        r"\b(data\s+analysis|statistical|evidence|performance\s+data"
+        r"|quantitative|metric|KPI|benchmark|scorecard)\b", re.I)),
+    ("key_findings", re.compile(
+        r"\b(finding|result|analysis|trend|insight|assessment|evaluation"
+        r"|comparative|impact|overview\s+of\s+result|key\s+observation)\b", re.I)),
+]
+
+
+def classify_sections(tree: ContentTree) -> dict[str, str]:
+    """Map section headings → narrative_role using keyword patterns.
+
+    Returns ``{heading: role}``.  Pure Python, no LLM call.
+    """
+    mapping: dict[str, str] = {}
+
+    for sec in tree.sections:
+        role = _classify_one_section(sec)
+        mapping[sec.heading] = role
+        for sub in sec.subsections:
+            mapping[sub.heading] = _classify_one_section(sub)
+
+    return mapping
+
+
+def _classify_one_section(sec: ContentSection) -> str:
+    """Classify a single section by heading + content signals."""
+    heading_lower = sec.heading.lower()
+
+    # Skip structural headings
+    if heading_lower in ("table of contents", "contents", "references",
+                         "references and source documentation", "bibliography"):
+        return "key_findings"  # safe fallback
+
+    # Pattern matching on heading text (highest priority)
+    for role, pattern in _ROLE_PATTERNS:
+        if pattern.search(sec.heading):
+            return role
+
+    # Data-signal fallback: sections rich in tables/metrics → data_evidence
+    n_tables = len(sec.tables) + sum(len(s.tables) for s in sec.subsections)
+    n_metrics = len(sec.metrics) + sum(len(s.metrics) for s in sec.subsections)
+    if n_tables >= 2 or n_metrics >= 4:
+        return "data_evidence"
+
+    # Conclusion-like headings
+    if re.search(r"\b(conclusion|summary|key\s+takeaway|wrap[\s-]up)\b", heading_lower):
+        return "conclusion"
+
+    return "key_findings"  # safest default
+
+
+def score_section_importance(sec: ContentSection) -> float:
+    """Score a section 0.0–1.0 based on data richness and substance.
+
+    Pure Python, no LLM call.
+    """
+    score = 0.0
+
+    # Tables: +0.15 each, capped at 0.4
+    n_tables = len(sec.tables) + sum(len(s.tables) for s in sec.subsections)
+    score += min(n_tables * 0.15, 0.4)
+
+    # Metrics: +0.08 each, capped at 0.3
+    n_metrics = len(sec.metrics) + sum(len(s.metrics) for s in sec.subsections)
+    score += min(n_metrics * 0.08, 0.3)
+
+    # Numeric density in text: count numbers in text + bullets
+    combined = sec.text + " " + " ".join(sec.bullets)
+    num_count = len(_NUMBER_RE.findall(combined))
+    score += min(num_count * 0.02, 0.15)
+
+    # Substance: text length
+    total_chars = len(sec.text) + sum(len(b) for b in sec.bullets)
+    for sub in sec.subsections:
+        total_chars += len(sub.text) + sum(len(b) for b in sub.bullets)
+    if total_chars > 200:
+        score += 0.1
+    if total_chars > 500:
+        score += 0.05
+
+    return min(score, 1.0)
+
+
+def generate_action_title(sec: ContentSection, role: str) -> str:
+    """Generate a data-driven action title from section content.
+
+    Extracts the top metric or numeric finding and combines it with the
+    section theme.  Falls back to the original heading if no data found.
+
+    Pure Python, no LLM call.
+
+    Examples:
+        "Market Overview"  → "Global Semiconductor Market Reached $580B in 2025"
+        "ROE Analysis"     → "FAB Leads with 20% ROTE — Bank ABC Trails at 7.1%"
+    """
+    heading = sec.heading.strip()
+
+    # Collect all metrics from section + subsections
+    all_metrics: list[KeyMetric] = list(sec.metrics)
+    for sub in sec.subsections:
+        all_metrics.extend(sub.metrics)
+
+    # Strategy 1: Use the best metric
+    if all_metrics:
+        scored = [_score_metric(m) for m in all_metrics]
+        scored.sort(key=lambda s: s.score, reverse=True)
+        best = scored[0].metric
+        title = f"{heading} — {best.label}: {best.value}"
+        if len(title) <= 80:
+            return title
+        # Truncate label if too long
+        return f"{heading} — {best.value}"[:80]
+
+    # Strategy 2: Extract first strong number from text/bullets
+    combined = sec.text + " " + " ".join(sec.bullets[:4])
+    # Look for sentences with numbers
+    sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', combined) if s.strip()]
+    for sentence in sentences[:5]:
+        nums = _NUMBER_RE.findall(sentence)
+        if nums and len(sentence) <= 90:
+            # Use this sentence as the title (it has data)
+            return sentence[:80]
+
+    # Strategy 3: Extract key number from first table
+    all_tables = list(sec.tables)
+    for sub in sec.subsections:
+        all_tables.extend(sub.tables)
+    if all_tables:
+        tbl = all_tables[0]
+        if tbl.rows and tbl.headers and len(tbl.headers) >= 2:
+            # Use first row's key value
+            first_row = tbl.rows[0]
+            if len(first_row) >= 2:
+                category = str(first_row[0])[:30]
+                value = str(first_row[1])[:20]
+                title = f"{heading}: {category} at {value}"
+                if len(title) <= 80:
+                    return title
+
+    # Fallback: original heading
+    return heading

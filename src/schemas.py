@@ -21,6 +21,7 @@ class ContentSection(BaseModel):
     level: int = 1
     text: str = ""
     bullets: list[str] = Field(default_factory=list)
+    code_blocks: list[str] = Field(default_factory=list)  # Code blocks from markdown
     tables: list[DataTable] = Field(default_factory=list)
     metrics: list[KeyMetric] = Field(default_factory=list)
     subsections: list[ContentSection] = Field(default_factory=list)
@@ -48,10 +49,12 @@ class Position(BaseModel):
 class TextContent(BaseModel):
     text: str
     font_size: Optional[int] = None        # Pt value
+    font_name: Optional[str] = None        # e.g., "Inter", "JetBrains Mono"
     bold: bool = False
     italic: bool = False
     color: Optional[str] = None            # hex e.g. "1F77B4"
     alignment: Optional[str] = None        # left, center, right
+    is_code: bool = False                # True for code/technical content
 
 class BulletContent(BaseModel):
     items: list[str]
@@ -62,6 +65,8 @@ class ChartContent(BaseModel):
     title: Optional[str] = None
     categories: list[str] = Field(default_factory=list)
     series: list[ChartSeries] = Field(default_factory=list)
+    # True → value axis should be logarithmic (set when values span >2 orders of magnitude)
+    log_scale: bool = False
 
 class ChartSeries(BaseModel):
     name: str
@@ -81,7 +86,15 @@ class ShapeContent(BaseModel):
     bold: bool = False
 
 class InfographicContent(BaseModel):
-    infographic_type: Literal["process_flow", "timeline", "comparison", "kpi_cards", "hierarchy"]
+    infographic_type: Literal[
+        # Existing archetypes
+        "process_flow", "timeline", "comparison", "kpi_cards", "hierarchy",
+        # New archetypes added in visual-overhaul iteration
+        "icon_list",        # icon + title + description rows (replaces monotonous numbered cards)
+        "stat_grid",        # 3-4 hero metrics in a clean grid
+        "hero_number",      # single giant metric + narrative sidebar
+        "pull_quote",       # editorial quote with attribution
+    ]
     items: list[InfographicItem] = Field(default_factory=list)
 
 class InfographicItem(BaseModel):
@@ -111,6 +124,7 @@ class SlideSpec(BaseModel):
     title: str = ""
     subtitle: Optional[str] = None
     elements: list[SlideElement] = Field(default_factory=list)
+    importance_score: float = 0.5               # carried from SlidePlanItem for trim decisions
 
 
 # ── Full presentation specification ──────────────────────────────────
@@ -120,7 +134,9 @@ class PresentationSpec(BaseModel):
     subtitle: str = ""
     slides: list[SlideSpec] = Field(default_factory=list)
     template_path: str = ""
-    target_slide_count: int = 12
+    target_slide_count: int = 15
+    presenter: str = ""          # Presenter name for cover slide footer
+    date_str: str = ""           # Date string for cover slide footer (e.g. "April 17, 2026")
 
 
 # ── Slide master metadata ───────────────────────────────────────────
@@ -184,11 +200,42 @@ class SlidePlanItem(BaseModel):
     chart_type_hint: Optional[Literal["bar", "column", "line", "pie", "area", "doughnut"]] = None
     infographic_type_hint: Optional[Literal["process_flow", "timeline", "comparison", "kpi_cards", "hierarchy"]] = None
     key_message: str = ""
+    narrative_role: Literal[
+        "cover", "agenda", "executive_summary", "market_landscape",
+        "methodology", "key_findings", "data_evidence", "timeline_roadmap",
+        "case_study", "regional_analysis", "challenges_risks",
+        "recommendations", "impact_analysis", "conclusion", "thank_you",
+    ] = "key_findings"
+    importance_score: float = 0.5   # 0.0-1.0 from content profiler
+    action_title: str = ""          # data-driven title e.g. "FAB Leads with 20% ROTE"
+    merge_sources: list[str] = Field(default_factory=list)  # sections merged into this slide
+    drop_reason: str = ""           # why a role was dropped (for logging)
 
 class SlidePlan(BaseModel):
     storyline_summary: str
-    target_slide_count: int = 12
+    target_slide_count: int = 15
     slides: list[SlidePlanItem] = Field(default_factory=list)
+
+
+# ── AI-written content (content_writer output) ─────────────────────
+
+class SlideContent(BaseModel):
+    """AI-written, presentation-ready content for a single slide."""
+    slide_number: int
+    title: str                                              # Action-oriented, data-driven title
+    subtitle: str = ""
+    key_takeaway: str = ""                                   # Single-sentence insight
+    bullets: list[str] = Field(default_factory=list)         # Concise, AI-rewritten bullets
+    chart_insight: str = ""                                  # Data story for chart title/callout
+    infographic_items: list[InfographicItem] = Field(default_factory=list)
+    table_summary: str = ""                                  # Context sentence for table
+    speaker_notes: str = ""                                  # Optional presenter notes
+
+class DeckContent(BaseModel):
+    """AI-written content for the entire deck (mega-call output)."""
+    storyline_summary: str
+    slides: list[SlideContent] = Field(default_factory=list)
+    narrative_thread: str = ""                               # How slides connect to each other
 
 
 # Fix forward references
