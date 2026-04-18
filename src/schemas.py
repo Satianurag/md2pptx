@@ -185,6 +185,54 @@ class SlideMasterInfo(BaseModel):
     theme_colors: ThemeColors = Field(default_factory=ThemeColors)
 
 
+# ── Content inventory (research §5.2 — Phase 1 output) ───────────
+# This is the ~500 token JSON sent to the LLM for content triage.
+# It summarises the markdown without including full text.
+
+class SectionInventory(BaseModel):
+    """Per-section statistics for the content inventory."""
+    heading: str
+    level: int
+    word_count: int = 0
+    bullet_count: int = 0
+    table_count: int = 0
+    image_count: int = 0
+    has_numeric_data: bool = False
+    has_temporal_data: bool = False
+    subsection_count: int = 0
+    classification: Literal[
+        "skip", "summary", "introduction", "content",
+        "conclusion", "future", "methodology", "results",
+    ] = "content"
+    importance_score: float = 0.5
+
+class TableInventory(BaseModel):
+    """Per-table statistics for the content inventory."""
+    section_heading: str = ""
+    column_count: int = 0
+    row_count: int = 0
+    has_numeric: bool = False
+    has_temporal: bool = False
+    chart_worthy: bool = False
+
+class ContentInventory(BaseModel):
+    """Compact summary of a parsed markdown file (~500 tokens).
+
+    This is the PRIMARY input to the LLM content triage call (Phase 2).
+    It never includes full text — only counts and flags.
+    """
+    title: str = ""
+    subtitle: str = ""
+    total_sections: int = 0
+    total_words: int = 0
+    total_tables: int = 0
+    total_images: int = 0
+    total_bullets: int = 0
+    has_executive_summary: bool = False
+    sections: list[SectionInventory] = Field(default_factory=list)
+    tables: list[TableInventory] = Field(default_factory=list)
+
+
 # ── Slide planning (AI planner output) ────────────────────────────
 
 class SlidePlanItem(BaseModel):

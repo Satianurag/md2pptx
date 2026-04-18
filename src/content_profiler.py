@@ -19,7 +19,10 @@ import logging
 import re
 from dataclasses import dataclass, field
 
-from .schemas import ContentTree, ContentSection, DataTable, KeyMetric
+from .schemas import (
+    ContentTree, ContentSection, DataTable, KeyMetric,
+    ContentInventory, SectionInventory, TableInventory,
+)
 
 log = logging.getLogger(__name__)
 
@@ -544,3 +547,87 @@ def generate_action_title(sec: ContentSection, role: str) -> str:
 
     # Fallback: original heading
     return heading
+
+
+# ---------------------------------------------------------------------------
+# Content Inventory builder (research §5.2 — Phase 1 → Phase 2 bridge)
+# ---------------------------------------------------------------------------
+
+def build_content_inventory(tree: ContentTree) -> ContentInventory:
+    """Build a compact ~500-token ContentInventory from a parsed ContentTree.
+
+    This is the PRIMARY input to the LLM content triage call (Phase 2).
+    It summarises structure and signals without including full text.
+    """
+    _num_re = re.compile(r"[\$€£]?\d[\d,.]*[%BMKTbmkt]?")
+    _temporal_re = re.compile(
+        r"\b(20[12]\d|Q[1-4]|year|month|quarter|FY\d{2})\b", re.I
+    )
+
+    section_items: list[SectionInventory] = []
+    table_items: list[TableInventory] = []
+    total_words = 0
+    total_bullets = 0
+    total_images = 0
+
+    def _count_words(text: str) -> int:
+        return len(text.split()) if text else 0
+
+    def _walk_section(sec: ContentSection) -> SectionInventory:
+        nonlocal total_words, total_bullets, total_images
+
+        wc = _count_words(sec.text) + sum(_count_words(b) for b in sec.bullets)
+        total_words += wc
+        total_bullets += len(sec.bullets)
+
+        combined = sec.text + " " + " ".join(sec.bullets[:10])
+        has_numeric = bool(_num_re.search(combined))
+        has_temporal = bool(_temporal_re.search(combined))
+
+        for tbl in sec.tables:
+            tbl_text = " ".join(tbl.headers) + " ".join(
+                " ".join(row) for row in tbl.rows[:3]
+            )
+            t_inv = TableInventory(
+                section_heading=sec.heading,
+                column_count=len(tbl.headers),
+                row_count=len(tbl.rows),
+                has_numeric=bool(_num_re.search(tbl_text)),
+                has_temporal=bool(_temporal_re.search(tbl_text)),
+                chart_worthy=len(tbl.rows) >= 2 and bool(_num_re.search(tbl_text)),
+            )
+            table_items.append(t_inv)
+
+        inv = SectionInventory(
+            heading=sec.heading,
+            level=sec.level,
+            word_count=wc,
+            bullet_count=len(sec.bullets),
+            table_count=len(sec.tables),
+            image_count=0,
+            has_numeric_data=has_numeric,
+            has_temporal_data=has_temporal,
+            subsection_count=len(sec.subsections),
+        )
+        section_items.append(inv)
+
+        for sub in sec.subsections:
+            _walk_section(sub)
+
+        return inv
+
+    for sec in tree.sections:
+        _walk_section(sec)
+
+    return ContentInventory(
+        title=tree.title,
+        subtitle=tree.subtitle,
+        total_sections=len(section_items),
+        total_words=total_words,
+        total_tables=len(tree.all_tables),
+        total_images=total_images,
+        total_bullets=total_bullets,
+        has_executive_summary=bool(tree.executive_summary),
+        sections=section_items,
+        tables=table_items,
+    )

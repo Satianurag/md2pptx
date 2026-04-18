@@ -1,6 +1,18 @@
-"""Grid alignment system for snapping slide elements to consistent positions."""
+"""Grid alignment system for snapping slide elements to consistent positions.
+
+Key design decisions (from research §6.4, §14.2, gap_analysis CRITICAL-5):
+- Grid adapts to template-specific safe zones by detecting master-level
+  obstacle shapes (logos, decorative text boxes) that overlap the content area.
+- AI Bubble and Accenture templates have a large master text placeholder
+  (12.56" × 1.66") plus logos that create no-go zones for content.
+- UAE Solar has no Blank layout, so the grid must work with whatever
+  canvas layout is available (possibly with background images).
+- Footer zone (bottom 12%) is always reserved for slide numbers/footers.
+"""
 from __future__ import annotations
 import logging
+from pathlib import Path
+from pptx import Presentation as _Presentation
 from .schemas import Position, SlideMasterInfo
 from . import config
 
@@ -62,6 +74,9 @@ class Grid:
         Content top is inferred from the 'title_only' layout placeholder
         positions (title bottom + gap).  Content bottom is inferred from
         footer placeholders or the default margin.
+
+        Master-level obstacle shapes (CRITICAL-5) are detected and the
+        content area is shrunk to avoid them.
         """
         slide_w = master_info.slide_width or config.SLIDE_WIDTH
         slide_h = master_info.slide_height or config.SLIDE_HEIGHT
@@ -98,9 +113,33 @@ class Grid:
         else:
             m_bottom = int(config.MARGIN_BOTTOM)
 
+        # --- CRITICAL-5: Detect master-level obstacle shapes ---
+        obstacles = detect_master_obstacles(master_info.template_path)
+        for obs in obstacles:
+            # Obstacle in bottom zone → increase bottom margin
+            if obs["top"] > slide_h * 0.70:
+                obs_bottom_margin = slide_h - obs["top"] + 50000
+                if obs_bottom_margin > m_bottom:
+                    m_bottom = obs_bottom_margin
+                    logger.debug(f"Master obstacle in bottom zone, m_bottom={m_bottom}")
+            # Obstacle in left zone → increase left margin
+            if obs["left"] < slide_w * 0.15 and obs["width"] < slide_w * 0.20:
+                obs_left = obs["left"] + obs["width"] + 50000
+                if obs_left > m_left:
+                    m_left = obs_left
+                    logger.debug(f"Master obstacle in left zone, m_left={m_left}")
+            # Obstacle in right zone → increase right margin
+            obs_right_edge = obs["left"] + obs["width"]
+            if obs_right_edge > slide_w * 0.85 and obs["width"] < slide_w * 0.20:
+                obs_right = slide_w - obs["left"] + 50000
+                if obs_right > m_right:
+                    m_right = obs_right
+                    logger.debug(f"Master obstacle in right zone, m_right={m_right}")
+
         logger.debug(
             f"Grid.from_template: slide={slide_w}x{slide_h}, "
-            f"content_top={content_top}, m_bottom={m_bottom}"
+            f"content_top={content_top}, m_bottom={m_bottom}, "
+            f"obstacles={len(obstacles)}"
         )
         return cls(
             slide_w=slide_w, slide_h=slide_h,
@@ -261,3 +300,48 @@ class Grid:
                 height=card_h,
             ))
         return positions
+
+
+# ── Master-level obstacle detection (CRITICAL-5) ────────────────────
+
+def detect_master_obstacles(template_path: str | Path) -> list[dict[str, int]]:
+    """Detect non-placeholder shapes on the slide master that create obstacle zones.
+
+    AI Bubble and Accenture templates have a large text placeholder
+    (12.56" × 1.66") on the slide master plus a logo.  Content placed
+    over these areas will be hidden or look broken.
+
+    Returns a list of obstacle dicts with keys: left, top, width, height (EMU).
+    """
+    template_path = Path(template_path)
+    if not template_path.exists():
+        return []
+
+    obstacles: list[dict[str, int]] = []
+    try:
+        prs = _Presentation(str(template_path))
+        master = prs.slide_masters[0]
+
+        # Slide master shapes that are NOT placeholders are decorative/obstacle
+        for shape in master.shapes:
+            if getattr(shape, "is_placeholder", False):
+                continue
+            # Skip very small shapes (icons < 0.5" in both dimensions)
+            w = shape.width or 0
+            h = shape.height or 0
+            if w < 457200 and h < 457200:  # < 0.5 inches
+                continue
+            obstacles.append({
+                "left": shape.left or 0,
+                "top": shape.top or 0,
+                "width": w,
+                "height": h,
+            })
+            logger.debug(
+                f"Master obstacle: {shape.shape_type} at "
+                f"({shape.left}, {shape.top}) size {w}x{h} EMU"
+            )
+    except Exception as e:
+        logger.warning(f"Failed to detect master obstacles: {e}")
+
+    return obstacles

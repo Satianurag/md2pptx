@@ -1,3 +1,15 @@
+"""Slide-master introspection and layout selection.
+
+Critical design decisions (from research §6.2):
+- Layout selection is **index-based**, never name-based, because UAE Solar
+  has 3 layouts with the identical name "1_E_Title, Subtitle and Body".
+- UAE Solar has **no Blank layout**; the emptiest layout (index 4) has a
+  full-width image covering 61 % of the slide.  The grid system must
+  account for this by selecting the layout with the fewest content
+  placeholders as the canvas layout.
+- Template identification uses fuzzy word-overlap scoring against the
+  markdown filename to auto-detect which of the 3 templates to use.
+"""
 from __future__ import annotations
 import zipfile
 import logging
@@ -17,6 +29,16 @@ _COLOR_SLOTS = (
     "accent1", "accent2", "accent3", "accent4", "accent5", "accent6",
     "hlink", "folHlink",
 )
+
+# ── Per-template index-based layout map (research §6.2) ─────────────
+# Keys: purpose strings.  Values: layout indices.
+# This avoids name-based lookup entirely — UAE Solar has 3 layouts with
+# the same name, so name-matching is unreliable.
+LAYOUT_MAP: dict[str, dict[str, int]] = {
+    "AI_Bubble": {"cover": 0, "divider": 1, "blank": 2, "title_only": 3, "end": 4},
+    "UAE_Solar": {"cover": 0, "divider": 1, "content": 2, "end": -1},
+    "Accenture": {"cover": 0, "divider": 2, "blank": 3, "title_only": 4, "end": 5},
+}
 
 
 def _extract_theme_colors(template_path: Path) -> ThemeColors:
@@ -140,6 +162,22 @@ def read_slide_master(template_path: str | Path) -> SlideMasterInfo:
     )
 
 
+def identify_template(template_path: str | Path) -> str | None:
+    """Identify which known template family a PPTX belongs to.
+
+    Returns one of the LAYOUT_MAP keys ("AI_Bubble", "UAE_Solar",
+    "Accenture") or *None* if unrecognised.
+    """
+    stem = Path(template_path).stem.lower()
+    if "ai_bubble" in stem or "ai bubble" in stem or "detection" in stem and "investment" in stem:
+        return "AI_Bubble"
+    if "uae" in stem or "solar" in stem and "2050" in stem:
+        return "UAE_Solar"
+    if "accenture" in stem or "acquisition" in stem:
+        return "Accenture"
+    return None
+
+
 def find_layout_by_category(master_info: SlideMasterInfo, category: str,
                             excluded_idx: int | None = None) -> LayoutInfo | None:
     """Find the first layout matching a given category, optionally skipping an index."""
@@ -149,14 +187,68 @@ def find_layout_by_category(master_info: SlideMasterInfo, category: str,
     return None
 
 
+def _find_emptiest_layout(master_info: SlideMasterInfo,
+                          excluded_idx: int | None = None) -> LayoutInfo:
+    """Find the layout with the fewest content placeholders (canvas layout).
+
+    This handles templates like UAE Solar that have no Blank layout.
+    The "emptiest" layout is the best canvas for programmatic content.
+    """
+    _FURNITURE_TYPES = frozenset({"SLIDE_NUMBER", "FOOTER", "DATE_TIME"})
+    best: LayoutInfo | None = None
+    best_count = 999
+    for layout in master_info.layouts:
+        if layout.index == excluded_idx:
+            continue
+        if layout.category in ("cover", "divider", "thank_you"):
+            continue
+        content_phs = [
+            p for p in layout.placeholders
+            if (p.ph_type or "").upper() not in _FURNITURE_TYPES
+        ]
+        if len(content_phs) < best_count:
+            best_count = len(content_phs)
+            best = layout
+    return best or master_info.layouts[-1]
+
+
 def get_layout_for_slide_type(master_info: SlideMasterInfo, slide_type: str,
                               excluded_idx: int | None = None) -> LayoutInfo:
-    """Map a slide_type from SlideSpec to the best available layout.
+    """Map a slide_type to the best available layout.
 
-    *excluded_idx* prevents the bookend closing layout from being picked for
-    content slides (important when several layouts share the same name but
-    only one carries the "Thank you!" design).
+    Strategy (research §6.2–6.3):
+    1. If the template is known (in LAYOUT_MAP), use the explicit index.
+    2. Otherwise fall back to category-based heuristic matching.
+    3. If no category matches (e.g. UAE Solar has no blank), select the
+       layout with the fewest content placeholders as the canvas.
+
+    *excluded_idx* prevents the bookend closing layout from being picked
+    for content slides.
     """
+    # ── Step 1: Try known template index map ──
+    tpl_name = identify_template(master_info.template_path)
+    if tpl_name and tpl_name in LAYOUT_MAP:
+        tpl_map = LAYOUT_MAP[tpl_name]
+        # Map slide_type → purpose key in the template map
+        purpose_map: dict[str, list[str]] = {
+            "cover": ["cover"],
+            "section_divider": ["divider"],
+            "thank_you": ["end", "cover"],
+            "agenda": ["title_only", "blank", "content"],
+            "executive_summary": ["title_only", "blank", "content"],
+            "content": ["title_only", "blank", "content"],
+            "chart": ["title_only", "blank", "content"],
+            "table": ["title_only", "blank", "content"],
+            "infographic": ["title_only", "blank", "content"],
+            "mixed": ["title_only", "blank", "content"],
+            "conclusion": ["title_only", "blank", "content"],
+        }
+        for purpose in purpose_map.get(slide_type, ["blank", "content"]):
+            idx = tpl_map.get(purpose, -1)
+            if idx >= 0 and idx != excluded_idx and idx < len(master_info.layouts):
+                return master_info.layouts[idx]
+
+    # ── Step 2: Category-based fallback ──
     category_map: dict[str, list[str]] = {
         "cover": ["cover"],
         "section_divider": ["divider", "cover"],
@@ -177,19 +269,8 @@ def get_layout_for_slide_type(master_info: SlideMasterInfo, slide_type: str,
         if layout is not None:
             return layout
 
-    # Fallback: try broader categories before giving up
-    for fallback_cat in ("blank", "title_content", "other"):
-        fb = find_layout_by_category(master_info, fallback_cat, excluded_idx=excluded_idx)
-        if fb is not None:
-            return fb
-    # Last resort: first layout that isn't excluded or cover/divider
-    for layout in master_info.layouts:
-        if layout.index != excluded_idx and layout.category not in ("cover", "divider"):
-            return layout
-    for layout in master_info.layouts:
-        if layout.index != excluded_idx:
-            return layout
-    return master_info.layouts[0]
+    # ── Step 3: Emptiest-layout fallback (handles UAE Solar no-blank) ──
+    return _find_emptiest_layout(master_info, excluded_idx=excluded_idx)
 
 
 def auto_detect_template(md_filename: str) -> Path | None:
